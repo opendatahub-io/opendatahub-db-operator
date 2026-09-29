@@ -1,0 +1,26 @@
+resources:
+# All RBAC will be applied under this service account in
+# the deployment namespace. You may comment out this resource
+# if your manager will use a service account that exists at
+# runtime. Be sure to update RoleBinding and ClusterRoleBinding
+# subjects if changing service account names.
+- service_account.yaml
+- leader_election_role.yaml
+- leader_election_role_binding.yaml
+# The following RBAC configurations are used to protect
+# the metrics endpoint with authn/authz. These configurations
+# ensure that only authorized users and service accounts
+# can access the metrics endpoint. Comment the following
+# permissions if you want to disable this protection.
+# More info: https://book.kubebuilder.io/reference/metrics.html
+- metrics_auth_role.yaml
+- metrics_auth_role_binding.yaml
+- metrics_reader_role.yaml
+# role.yaml (the manager ClusterRole) is controller-gen-generated once the
+# DatabaseService CRD and its controller markers exist. role_binding.yaml is
+# deliberately NOT applied yet either: it's a ClusterRoleBinding to
+# "manager-role" by name, and without role.yaml existing in this
+# kustomization that name is unmanaged -- installing the binding now would
+# either dangle or, worse, silently bind the operator to an unrelated
+# ClusterRole that happens to already exist on the target cluster under the
+# same name. Both files are added to this list together, by hand, in phase 2.

@@ -1,0 +1,22 @@
+resources:
+- manager.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: controller
+  newName: quay.io/opendatahub/opendatahub-db-operator
+  newTag: latest
+# Generated (not a static configmap.yaml) so kustomize appends a
+# content hash to the name and rewrites manager.yaml's volume reference to
+# match. That name change is what forces a new pod template -- and so a
+# rollout -- whenever this data changes; a fixed ConfigMap name lets content
+# change silently under a running Deployment with no rollout at all.
+configMapGenerator:
+- name: config
+  namespace: system
+  literals:
+  - platformType=OpenDataHub
+  - platformVersion=
+  options:
+    labels:
+      app.kubernetes.io/name: opendatahub-db-operator

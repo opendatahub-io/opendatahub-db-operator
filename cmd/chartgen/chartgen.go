@@ -1,0 +1,422 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package chartgen
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
+	"sigs.k8s.io/yaml"
+
+	"github.com/opendatahub-io/opendatahub-db-operator/pkg/resources/gvk"
+)
+
+const (
+	defaultOutputDir   = "config/chart"
+	defaultChartName   = "opendatahub-db-operator"
+	defaultChartVer    = "0.1.0"
+	templatesDirName   = "templates"
+	chartYAMLFilename  = "Chart.yaml"
+	helpersTplFilename = "_helpers.tpl"
+	valuesYAMLFilename = "values.yaml"
+	valuesSchemaFile   = "values.schema.json"
+	coreAPIGroup       = "core"
+)
+
+// NewCommand returns the cobra command for the chartgen subcommand.
+func NewCommand() *cobra.Command {
+	var outputDir string
+	var chartName string
+	var chartVersion string
+
+	cmd := &cobra.Command{
+		Use:   "chartgen",
+		Short: "Generate a Helm chart from kustomize YAML on stdin",
+		Long: `Reads multi-document Kubernetes YAML from stdin (typically piped from
+kustomize build) and generates a Helm chart with proper templating.
+
+Example:
+  kustomize build config/default | manager chartgen --output config/chart`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(os.Stdin, outputDir, chartName, chartVersion)
+		},
+	}
+
+	cmd.Flags().StringVarP(&outputDir, "output", "o", defaultOutputDir, "Output directory for the chart")
+	cmd.Flags().StringVar(&chartName, "name", defaultChartName, "Chart name")
+	cmd.Flags().StringVar(&chartVersion, "version", defaultChartVer, "Chart version")
+
+	return cmd
+}
+
+func run(
+	reader io.Reader,
+	outputDir string,
+	chartName string,
+	chartVersion string,
+) error {
+	resources, err := decodeResources(reader)
+	if err != nil {
+		return fmt.Errorf("decoding resources: %w", err)
+	}
+
+	// Reject empty or Deployment-less input before touching outputDir at
+	// all. Without this, a failed upstream producer in the documented
+	// `kustomize build ... | manager chartgen ...` pipeline (empty stdin, or
+	// stdin that decodes but never yields the operator Deployment) would
+	// still exit 0 here, having already deleted templatesDir below and
+	// written a chart with no resources -- which `helm upgrade` would then
+	// apply, removing everything the previous, real chart installed.
+	if len(resources) == 0 {
+		return fmt.Errorf("no resources in input -- refusing to overwrite %s with an empty chart", outputDir)
+	}
+
+	// Resolve "the operator Deployment" exactly once. Every other
+	// per-Deployment fact (its ConfigMap, its ServiceAccount, its default
+	// image/resources/replicas) is derived from this same object below, so
+	// they can never disagree with each other -- or with which Deployment
+	// gets the operator-specific rendering in transformResource -- the way
+	// independent scans over resources could if more than one Deployment
+	// happened to look like a candidate.
+	operatorDeployment, err := findOperatorDeployment(resources)
+	if err != nil {
+		return fmt.Errorf("%w -- refusing to overwrite %s with an ambiguous chart", err, outputDir)
+	}
+
+	// Group resources by GVK, skip Namespaces
+	groups := groupByGVK(resources)
+
+	// Extract defaults from the resolved operator Deployment
+	values, err := ExtractDefaults(operatorDeployment, resources)
+	if err != nil {
+		return fmt.Errorf("extracting default values: %w", err)
+	}
+
+	operatorConfigMapName, err := OperatorConfigMapName(operatorDeployment)
+	if err != nil {
+		return fmt.Errorf("finding operator ConfigMap: %w", err)
+	}
+	// A ConfigMap volume is always resolved in the pod's own namespace, so
+	// operatorDeployment's namespace (not some other resource's) is the
+	// correct match here.
+	configMapManaged := resourceExists(resources, gvk.ConfigMap, operatorConfigMapName, operatorDeployment.GetNamespace())
+	if operatorConfigMapName != "" && !configMapManaged {
+		// The manager container's configuration volume names a ConfigMap
+		// this bundle doesn't itself create -- a pre-existing/externally
+		// managed config, which config/manager/kustomization.yaml doesn't
+		// currently do but nothing stops a future input from doing. There's
+		// no template for it, so nothing downstream can safely treat this
+		// name as "the" operator ConfigMap: stampConfigChecksumPlaceholder
+		// must not reference a core_v1_configmap.yaml template chartgen
+		// will never generate -- Helm's `include` would fail to find it at
+		// render time. (ExtractDefaults, above, already only reads a
+		// ConfigMap matching this exact name AND operatorDeployment's own
+		// namespace, so it can't have picked up a wrong-namespace,
+		// same-named one regardless of what this check finds.)
+		operatorConfigMapName = ""
+	}
+
+	saName, saNamespace, err := OperatorServiceAccountRef(operatorDeployment)
+	if err != nil {
+		return fmt.Errorf("finding operator ServiceAccount: %w", err)
+	}
+	// saManaged is deliberately not folded into saName/saNamespace by
+	// resetting them to "" the way operatorConfigMapName is above: a
+	// ServiceAccount's identity and its chart-ownership are different
+	// questions downstream. config/rbac/kustomization.yaml documents
+	// commenting out service_account.yaml to use an account that already
+	// exists on the cluster -- in that case there's no chart-managed
+	// identity to rename anything to, but the account (and any RoleBinding
+	// subject naming it) still moves to wherever this chart installs, the
+	// same as every other resource in the bundle. Losing the identity
+	// entirely (the old behavior) meant that namespace tracking got
+	// skipped too, not just the renaming. Namespace-qualified existence
+	// check: a same-named ServiceAccount in some other namespace is a
+	// different account, not evidence this one is chart-managed.
+	saManaged := saName != "" && resourceExists(resources, gvk.ServiceAccount, saName, saNamespace)
+
+	chartCtx := chartContext{
+		operatorDeployment: resourceRef{name: operatorDeployment.GetName(), namespace: operatorDeployment.GetNamespace()},
+		operatorConfigMap: resourceRef{
+			name:      operatorConfigMapName,
+			namespace: operatorDeployment.GetNamespace(),
+		},
+		operatorServiceAccount:        resourceRef{name: saName, namespace: saNamespace},
+		operatorServiceAccountManaged: saManaged,
+	}
+
+	// Render every template into memory FIRST, before touching outputDir at
+	// all. transformResource can still fail partway through this loop (an
+	// unreadable ConfigMap data map, and so on) -- input-shape problems
+	// findOperatorDeployment above doesn't catch. Discovering one only after
+	// templatesDir has already been wiped would leave an empty or partial
+	// chart in its place, which `helm upgrade` would then apply, removing
+	// whatever the previous, real chart had installed. Rendering to a map
+	// first means a failure here leaves outputDir completely untouched.
+	rendered := make(map[string]string, len(groups)+1)
+	rendered[helpersTplFilename] = helpersTpl
+
+	for resourceGVK, res := range groups {
+		filename := gvkToFilename(resourceGVK)
+
+		content, err := renderGroup(resourceGVK, res, chartCtx)
+		if err != nil {
+			return fmt.Errorf("rendering %s: %w", filename, err)
+		}
+
+		rendered[filename] = content
+	}
+
+	valuesYAML, err := MarshalValuesYAML(values)
+	if err != nil {
+		return fmt.Errorf("marshaling %s: %w", valuesYAMLFilename, err)
+	}
+
+	valuesSchema, err := MarshalValuesSchema()
+	if err != nil {
+		return fmt.Errorf("marshaling %s: %w", valuesSchemaFile, err)
+	}
+
+	// Everything above is pure computation; only from here does run() touch
+	// disk, and only with content that's already been fully validated.
+
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+
+	// Write Chart.yaml (only if missing) -- additive, never destructive.
+	chartFile := filepath.Join(outputDir, chartYAMLFilename)
+	if _, err := os.Stat(chartFile); os.IsNotExist(err) {
+		if err := writeChartYAML(chartFile, chartName, chartVersion); err != nil {
+			return fmt.Errorf("writing %s: %w", chartYAMLFilename, err)
+		}
+	}
+
+	// Stage everything else -- values.yaml, values.schema.json, and the
+	// templates directory -- in a scratch area, then publish each one with
+	// publishPath (see its doc comment for exactly what atomicity it does
+	// and doesn't provide). Writing values.yaml/values.schema.json directly
+	// with os.WriteFile, as an earlier version of this function did, is not
+	// atomic either: a crash or full disk mid-write leaves a truncated file
+	// in place over the previous, valid one.
+	stagingDir, err := os.MkdirTemp(outputDir, ".chartgen-staging-*")
+	if err != nil {
+		return fmt.Errorf("creating staging directory: %w", err)
+	}
+	defer os.RemoveAll(stagingDir) //nolint:errcheck // best-effort cleanup; no-op after successful publishing below.
+
+	stagingTemplatesDir := filepath.Join(stagingDir, templatesDirName)
+	if err := os.MkdirAll(stagingTemplatesDir, 0o755); err != nil {
+		return fmt.Errorf("creating staging templates directory: %w", err)
+	}
+	for filename, content := range rendered {
+		if err := os.WriteFile(filepath.Join(stagingTemplatesDir, filename), []byte(content), 0o644); err != nil {
+			return fmt.Errorf("staging %s: %w", filename, err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(stagingDir, valuesYAMLFilename), valuesYAML, 0o644); err != nil {
+		return fmt.Errorf("staging %s: %w", valuesYAMLFilename, err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, valuesSchemaFile), valuesSchema, 0o644); err != nil {
+		return fmt.Errorf("staging %s: %w", valuesSchemaFile, err)
+	}
+
+	if err := publishPath(stagingDir, outputDir, valuesYAMLFilename); err != nil {
+		return err
+	}
+	if err := publishPath(stagingDir, outputDir, valuesSchemaFile); err != nil {
+		return err
+	}
+	if err := publishPath(stagingDir, outputDir, templatesDirName); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Helm chart generated at %s\n", outputDir)
+
+	return nil
+}
+
+// publishPath moves name from stagingDir into outputDir, replacing whatever
+// is currently at outputDir/name. It never does a plain "remove destination,
+// then rename source into place": between those two steps outputDir/name
+// would not exist at all, which is exactly the destructive window this
+// function exists to close. Instead it renames the existing
+// outputDir/name (if any) to a backup path first, renames the staged
+// replacement into place, and only then removes the backup -- so at every
+// point outputDir/name is either the old content or the new content, never
+// neither, for anything short of a crash landing in the handful of
+// instructions between the two rename() syscalls (no I/O happens in
+// between). If the second rename fails, the backup is restored so the net
+// effect of a failed publishPath call is "nothing changed", not "the old
+// content is gone".
+//
+// If a *previous* run was killed in exactly that window, outputDir/name is
+// missing and its backup is still sitting there -- self-heal by restoring
+// it before doing anything else. This must happen before the unconditional
+// "clear the backup slot" step below, not after: clearing first and
+// recovering second (an earlier version of this function did exactly that)
+// destroys the one copy that recovery needed.
+//
+// This does not make the *set* of three publishPath calls in run() a single
+// transaction -- a crash between publishing values.yaml and publishing the
+// templates directory can still leave a values.yaml newer than the
+// templates next to it. Making that fully transactional would need a
+// manifest/lockfile scheme disproportionate to a developer-run code
+// generation step; per-artifact atomicity (recoverable even across process
+// restarts) is what this actually defends against.
+func publishPath(stagingDir, outputDir, name string) error {
+	src := filepath.Join(stagingDir, name)
+	dst := filepath.Join(outputDir, name)
+	backup := dst + ".chartgen-previous"
+
+	if _, dstErr := os.Lstat(dst); os.IsNotExist(dstErr) {
+		if _, backupErr := os.Lstat(backup); backupErr == nil {
+			if err := os.Rename(backup, dst); err != nil {
+				return fmt.Errorf("recovering %s from a previous interrupted publish: %w", name, err)
+			}
+		}
+	}
+
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("clearing backup path for %s: %w", name, err)
+	}
+
+	hadPrevious := true
+	if err := os.Rename(dst, backup); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("backing up existing %s: %w", name, err)
+		}
+		hadPrevious = false
+	}
+
+	if err := os.Rename(src, dst); err != nil {
+		if hadPrevious {
+			_ = os.Rename(backup, dst) // best-effort rollback -- restore what was there before.
+		}
+		return fmt.Errorf("publishing %s: %w", name, err)
+	}
+
+	if hadPrevious {
+		if err := os.RemoveAll(backup); err != nil {
+			return fmt.Errorf("removing backup of %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// decodeResources reads multi-document YAML from a reader and returns
+// a slice of unstructured resources.
+func decodeResources(reader io.Reader) ([]unstructured.Unstructured, error) {
+	var resources []unstructured.Unstructured
+
+	yr := utilyaml.NewYAMLReader(bufio.NewReader(reader))
+
+	for {
+		data, err := yr.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading YAML document: %w", err)
+		}
+
+		data = []byte(strings.TrimSpace(string(data)))
+		if len(data) == 0 {
+			continue
+		}
+
+		var obj unstructured.Unstructured
+		if err := yaml.Unmarshal(data, &obj.Object); err != nil {
+			return nil, fmt.Errorf("unmarshaling resource: %w", err)
+		}
+
+		if obj.Object == nil {
+			continue
+		}
+
+		resources = append(resources, obj)
+	}
+
+	return resources, nil
+}
+
+// resourceExists reports whether resources contains an object of the given
+// kind with exactly this name AND namespace -- i.e. whether some identifier
+// (a ConfigMap name read off a Deployment's volume, a ServiceAccount name
+// read off its serviceAccountName) actually corresponds to something this
+// bundle itself creates, as opposed to a reference to a pre-existing/
+// externally managed resource that happens to share a name. Namespace is
+// part of the check, not just name: a same-named ServiceAccount in some
+// other namespace is a different account entirely, not evidence this one is
+// chart-managed.
+func resourceExists(
+	resources []unstructured.Unstructured,
+	target schema.GroupVersionKind,
+	name, namespace string,
+) bool {
+	for _, r := range resources {
+		if r.GroupVersionKind() == target && r.GetName() == name && r.GetNamespace() == namespace {
+			return true
+		}
+	}
+
+	return false
+}
+
+// groupByGVK groups resources by their GroupVersionKind, skipping Namespaces.
+func groupByGVK(resources []unstructured.Unstructured) map[schema.GroupVersionKind][]unstructured.Unstructured {
+	groups := make(map[schema.GroupVersionKind][]unstructured.Unstructured)
+
+	for _, r := range resources {
+		resourceGVK := r.GroupVersionKind()
+
+		// Skip Namespace resources -- Helm manages namespace via --namespace
+		if resourceGVK == gvk.Namespace {
+			continue
+		}
+
+		groups[resourceGVK] = append(groups[resourceGVK], r)
+	}
+
+	return groups
+}
+
+// gvkToFilename converts a GVK to a template filename.
+// Uses the full unambiguous format: <group>_<version>_<kind>.yaml
+// Core API group (empty string) is rendered as "core".
+func gvkToFilename(resourceGVK schema.GroupVersionKind) string {
+	group := strings.ToLower(resourceGVK.Group)
+	if group == "" {
+		group = coreAPIGroup
+	}
+
+	return fmt.Sprintf("%s_%s_%s.yaml",
+		group,
+		strings.ToLower(resourceGVK.Version),
+		strings.ToLower(resourceGVK.Kind),
+	)
+}
