@@ -96,15 +96,62 @@ test-integration-run: ## Run integration tests against the current kubeconfig co
 test-integration: test-integration-setup test-integration-run ## Set up and run integration tests.
 
 .PHONY: test-e2e-setup
-test-e2e-setup: ## Prepare a cluster for e2e tests (no-op until phase 3 adds a Helm-installable operator).
-	@echo "e2e installation is not wired up yet; nothing to do."
+test-e2e-setup: test-e2e-context-check ## Build/load the manager image and install the Helm chart into Kind.
+	$(KUBECTL) get --raw=/readyz >/dev/null
+	$(MAKE) test-e2e-teardown
+	$(MAKE) container-build IMG="$(IMG)"
+	$(MAKE) container-load-kind IMG="$(IMG)" KIND_CLUSTER="$(KIND_CLUSTER)"
+	$(HELM) install "$(E2E_RELEASE)" config/chart \
+		--namespace "$(E2E_NAMESPACE)" --create-namespace --atomic --wait --timeout 5m \
+		--set-string operator.image.ref="$(IMG)" \
+		--set-string operator.image.pullPolicy=IfNotPresent || { \
+			install_status=$$?; \
+			if ! $(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m; then \
+				echo "e2e setup failed and namespace $(E2E_NAMESPACE) cleanup also failed" >&2; \
+			fi; \
+			exit "$$install_status"; \
+		}
 
 .PHONY: test-e2e-run
-test-e2e-run: ## Run e2e tests only (operator must already be deployed).
-	go test ./test/e2e/... -v -timeout 10m -failfast
+test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconciles DatabaseService, then clean up.
+	$(KUBECTL) get --raw=/readyz >/dev/null
+	@cleanup() { \
+		test_result=$$?; \
+		trap - EXIT; \
+		cleanup_result=0; \
+		$(MAKE) test-e2e-teardown || cleanup_result=$$?; \
+		if [ "$$test_result" -ne 0 ]; then exit "$$test_result"; fi; \
+		exit "$$cleanup_result"; \
+	}; \
+	trap cleanup EXIT; \
+	ODH_E2E_NAMESPACE="$(E2E_NAMESPACE)" \
+	ODH_E2E_RELEASE="$(E2E_RELEASE)" \
+	ODH_E2E_OPERATOR_IMAGE="$(IMG)" \
+		go test ./test/e2e/... -v -timeout 10m -failfast
+
+.PHONY: test-e2e-teardown
+test-e2e-teardown: test-e2e-context-check ## Remove the e2e DatabaseService, Helm release, and namespace.
+	@cleanup_status=0; \
+	if $(KUBECTL) get crd databaseservices.services.platform.opendatahub.io >/dev/null 2>&1; then \
+		$(KUBECTL) delete databaseservice default-db-operator --ignore-not-found --wait || cleanup_status=$$?; \
+	fi; \
+	$(HELM) uninstall "$(E2E_RELEASE)" --namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout 5m || cleanup_status=$$?; \
+	$(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m || cleanup_status=$$?; \
+	exit "$$cleanup_status"
+
+.PHONY: test-e2e-context-check
+test-e2e-context-check:
+	@context="$$($(KUBECTL) config current-context)"; \
+	expected="kind-$(KIND_CLUSTER)"; \
+	if [ "$$context" != "$$expected" ]; then \
+		echo "e2e requires kube context $$expected (current: $$context)" >&2; \
+		exit 1; \
+	fi
 
 .PHONY: test-e2e
-test-e2e: test-e2e-setup test-e2e-run ## Set up and run e2e tests.
+test-e2e: ## Set up and run e2e tests.
+	$(MAKE) test-e2e-setup
+	$(MAKE) test-e2e-run
 
 ##@ Build
 
@@ -141,23 +188,22 @@ container-push: ## Push container image with the manager.
 	$(CONTAINER_TOOL) push "$(IMG)"
 
 KIND_CLUSTER ?= db-operator-dev
+E2E_NAMESPACE ?= opendatahub-db-operator-e2e
+E2E_RELEASE   ?= opendatahub-db-operator-e2e
 
 .PHONY: container-load-kind
 container-load-kind: ## Load $(IMG) into a Kind cluster. `kind load docker-image` doesn't work with the podman provider.
-	tmp="$$(mktemp)"; \
-	$(CONTAINER_TOOL) save "$(IMG)" -o "$$tmp.tar" && \
-	$(KIND) load image-archive "$$tmp.tar" --name "$(KIND_CLUSTER)" && \
-	rm -f "$$tmp.tar"
+	tmp="$$(mktemp)"; trap 'rm -f "$$tmp" "$$tmp.tar"' EXIT; \
+	$(CONTAINER_TOOL) save "$(IMG)" -o "$$tmp.tar"; \
+	$(KIND) load image-archive "$$tmp.tar" --name "$(KIND_CLUSTER)"
 
 ##@ Helm
 
 .PHONY: helm
-helm: manifests generate ## Generate a Helm chart from kustomize output via chartgen.
-	# chartgen itself only replaces config/chart's contents after fully
-	# rendering and validating the new chart (see run() in
-	# cmd/chartgen/chartgen.go) -- deleting the directory upfront here would
-	# defeat that: a failed run would still leave config/chart empty/gone.
+helm: manifests generate ## Generate and lint the Helm chart from kustomize output via chartgen.
+	# Chartgen stages output before replacing chart artifacts; do not delete config/chart before running it.
 	$(KUSTOMIZE) build config/default | go run ./cmd/main.go chartgen --output config/chart
+	$(HELM) lint config/chart
 
 ##@ Deployment
 

@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
@@ -37,6 +38,7 @@ const (
 	defaultOutputDir   = "config/chart"
 	defaultChartName   = "opendatahub-db-operator"
 	defaultChartVer    = "0.1.0"
+	crdsDirName        = "crds"
 	templatesDirName   = "templates"
 	chartYAMLFilename  = "Chart.yaml"
 	helpersTplFilename = "_helpers.tpl"
@@ -82,13 +84,7 @@ func run(
 		return fmt.Errorf("decoding resources: %w", err)
 	}
 
-	// Reject empty or Deployment-less input before touching outputDir at
-	// all. Without this, a failed upstream producer in the documented
-	// `kustomize build ... | manager chartgen ...` pipeline (empty stdin, or
-	// stdin that decodes but never yields the operator Deployment) would
-	// still exit 0 here, having already deleted templatesDir below and
-	// written a chart with no resources -- which `helm upgrade` would then
-	// apply, removing everything the previous, real chart installed.
+	// Reject empty input so a failed upstream build cannot publish a resource-free chart.
 	if len(resources) == 0 {
 		return fmt.Errorf("no resources in input -- refusing to overwrite %s with an empty chart", outputDir)
 	}
@@ -105,10 +101,8 @@ func run(
 		return fmt.Errorf("%w -- refusing to overwrite %s with an ambiguous chart", err, outputDir)
 	}
 
-	// Group resources by GVK, skip Namespaces
 	groups := groupByGVK(resources)
 
-	// Extract defaults from the resolved operator Deployment
 	values, err := ExtractDefaults(operatorDeployment, resources)
 	if err != nil {
 		return fmt.Errorf("extracting default values: %w", err)
@@ -137,6 +131,13 @@ func run(
 		// same-named one regardless of what this check finds.)
 		operatorConfigMapName = ""
 	}
+	if err := validateConfigMapStableNames(resources, types.NamespacedName{
+		Name:      operatorConfigMapName,
+		Namespace: operatorDeployment.GetNamespace(),
+	}); err != nil {
+		return err
+	}
+	operatorConfigMapStableName := stripKustomizeConfigMapHash(operatorConfigMapName)
 
 	saName, saNamespace, err := OperatorServiceAccountRef(operatorDeployment)
 	if err != nil {
@@ -158,12 +159,19 @@ func run(
 	saManaged := saName != "" && resourceExists(resources, gvk.ServiceAccount, saName, saNamespace)
 
 	chartCtx := chartContext{
-		operatorDeployment: resourceRef{name: operatorDeployment.GetName(), namespace: operatorDeployment.GetNamespace()},
-		operatorConfigMap: resourceRef{
-			name:      operatorConfigMapName,
-			namespace: operatorDeployment.GetNamespace(),
+		operatorDeployment: types.NamespacedName{
+			Name:      operatorDeployment.GetName(),
+			Namespace: operatorDeployment.GetNamespace(),
 		},
-		operatorServiceAccount:        resourceRef{name: saName, namespace: saNamespace},
+		operatorConfigMap: types.NamespacedName{
+			Name:      operatorConfigMapName,
+			Namespace: operatorDeployment.GetNamespace(),
+		},
+		operatorConfigMapStableName: operatorConfigMapStableName,
+		operatorServiceAccount: types.NamespacedName{
+			Name:      saName,
+			Namespace: saNamespace,
+		},
 		operatorServiceAccountManaged: saManaged,
 	}
 
@@ -175,19 +183,11 @@ func run(
 	// chart in its place, which `helm upgrade` would then apply, removing
 	// whatever the previous, real chart had installed. Rendering to a map
 	// first means a failure here leaves outputDir completely untouched.
-	rendered := make(map[string]string, len(groups)+1)
-	rendered[helpersTplFilename] = helpersTpl
-
-	for resourceGVK, res := range groups {
-		filename := gvkToFilename(resourceGVK)
-
-		content, err := renderGroup(resourceGVK, res, chartCtx)
-		if err != nil {
-			return fmt.Errorf("rendering %s: %w", filename, err)
-		}
-
-		rendered[filename] = content
+	renderedTemplates, renderedCRDs, err := renderResourceGroups(groups, chartCtx)
+	if err != nil {
+		return err
 	}
+	renderedTemplates[helpersTplFilename] = helpersTpl
 
 	valuesYAML, err := MarshalValuesYAML(values)
 	if err != nil {
@@ -231,9 +231,18 @@ func run(
 	if err := os.MkdirAll(stagingTemplatesDir, 0o755); err != nil {
 		return fmt.Errorf("creating staging templates directory: %w", err)
 	}
-	for filename, content := range rendered {
+	stagingCRDsDir := filepath.Join(stagingDir, crdsDirName)
+	if err := os.MkdirAll(stagingCRDsDir, 0o755); err != nil {
+		return fmt.Errorf("creating staging CRDs directory: %w", err)
+	}
+	for filename, content := range renderedTemplates {
 		if err := os.WriteFile(filepath.Join(stagingTemplatesDir, filename), []byte(content), 0o644); err != nil {
 			return fmt.Errorf("staging %s: %w", filename, err)
+		}
+	}
+	for filename, content := range renderedCRDs {
+		if err := os.WriteFile(filepath.Join(stagingCRDsDir, filename), []byte(content), 0o644); err != nil {
+			return fmt.Errorf("staging CRD %s: %w", filename, err)
 		}
 	}
 
@@ -253,40 +262,39 @@ func run(
 	if err := publishPath(stagingDir, outputDir, templatesDirName); err != nil {
 		return err
 	}
+	if err := publishPath(stagingDir, outputDir, crdsDirName); err != nil {
+		return err
+	}
 
 	fmt.Fprintf(os.Stderr, "Helm chart generated at %s\n", outputDir)
 
 	return nil
 }
 
-// publishPath moves name from stagingDir into outputDir, replacing whatever
-// is currently at outputDir/name. It never does a plain "remove destination,
-// then rename source into place": between those two steps outputDir/name
-// would not exist at all, which is exactly the destructive window this
-// function exists to close. Instead it renames the existing
-// outputDir/name (if any) to a backup path first, renames the staged
-// replacement into place, and only then removes the backup -- so at every
-// point outputDir/name is either the old content or the new content, never
-// neither, for anything short of a crash landing in the handful of
-// instructions between the two rename() syscalls (no I/O happens in
-// between). If the second rename fails, the backup is restored so the net
-// effect of a failed publishPath call is "nothing changed", not "the old
-// content is gone".
-//
-// If a *previous* run was killed in exactly that window, outputDir/name is
-// missing and its backup is still sitting there -- self-heal by restoring
-// it before doing anything else. This must happen before the unconditional
-// "clear the backup slot" step below, not after: clearing first and
-// recovering second (an earlier version of this function did exactly that)
-// destroys the one copy that recovery needed.
-//
-// This does not make the *set* of three publishPath calls in run() a single
-// transaction -- a crash between publishing values.yaml and publishing the
-// templates directory can still leave a values.yaml newer than the
-// templates next to it. Making that fully transactional would need a
-// manifest/lockfile scheme disproportionate to a developer-run code
-// generation step; per-artifact atomicity (recoverable even across process
-// restarts) is what this actually defends against.
+func renderResourceGroups(
+	groups map[schema.GroupVersionKind][]unstructured.Unstructured,
+	chartCtx chartContext,
+) (map[string]string, map[string]string, error) {
+	renderedTemplates := make(map[string]string, len(groups))
+	renderedCRDs := make(map[string]string)
+	for resourceGVK, resources := range groups {
+		filename := gvkToFilename(resourceGVK)
+		content, err := renderGroup(resourceGVK, resources, chartCtx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rendering %s: %w", filename, err)
+		}
+		if isCRD(resourceGVK) {
+			renderedCRDs[filename] = content
+		} else {
+			renderedTemplates[filename] = content
+		}
+	}
+
+	return renderedTemplates, renderedCRDs, nil
+}
+
+// publishPath replaces one artifact through a backup rename and restores that backup after a failed publish.
+// Each artifact is atomic; run() does not publish the complete chart as one transaction.
 func publishPath(stagingDir, outputDir, name string) error {
 	src := filepath.Join(stagingDir, name)
 	dst := filepath.Join(outputDir, name)
@@ -385,6 +393,59 @@ func resourceExists(
 	}
 
 	return false
+}
+
+// Helm uses a content checksum for rollouts, so generated ConfigMaps need stable names.
+func stripKustomizeConfigMapHash(name string) string {
+	separator := strings.LastIndex(name, "-")
+	if separator < 0 || len(name)-separator-1 != 10 {
+		return name
+	}
+
+	for _, char := range name[separator+1:] {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return name
+		}
+	}
+
+	return name[:separator]
+}
+
+func validateConfigMapStableNames(
+	resources []unstructured.Unstructured,
+	operatorConfigMap types.NamespacedName,
+) error {
+	originalIdentitiesByEmittedName := make(map[string]types.NamespacedName)
+	for i := range resources {
+		resource := &resources[i]
+		if resource.GroupVersionKind() != gvk.ConfigMap {
+			continue
+		}
+
+		originalIdentity := types.NamespacedName{
+			Name:      resource.GetName(),
+			Namespace: resource.GetNamespace(),
+		}
+		emittedName := originalIdentity.Name
+		if originalIdentity == operatorConfigMap {
+			emittedName = stripKustomizeConfigMapHash(emittedName)
+		}
+		if previousIdentity, found := originalIdentitiesByEmittedName[emittedName]; found {
+			return fmt.Errorf(
+				"ConfigMap name collision: %s and %s both emit as %q in the chart namespace",
+				previousIdentity,
+				originalIdentity,
+				emittedName,
+			)
+		}
+		originalIdentitiesByEmittedName[emittedName] = originalIdentity
+	}
+
+	return nil
+}
+
+func isCRD(resourceGVK schema.GroupVersionKind) bool {
+	return resourceGVK.Group == "apiextensions.k8s.io" && resourceGVK.Kind == "CustomResourceDefinition"
 }
 
 // groupByGVK groups resources by their GroupVersionKind, skipping Namespaces.

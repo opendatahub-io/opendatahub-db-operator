@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 )
 
@@ -112,7 +113,7 @@ subjects:
   name: some-group
 `)
 
-	rendered, err := transformRoleBinding(&obj, resourceRef{name: "operator", namespace: "system"}, true)
+	rendered, err := transformRoleBinding(&obj, types.NamespacedName{Name: "operator", Namespace: "system"}, true)
 	g.Expect(err).NotTo(HaveOccurred())
 
 	g.Expect(rendered).To(ContainSubstring(`name: {{ default (include "chart.fullname" .) .Values.serviceAccount.name }}`))
@@ -140,7 +141,7 @@ subjects:
   namespace: some-other-namespace
 `)
 
-	rendered, err := transformRoleBinding(&obj, resourceRef{name: "operator", namespace: "system"}, true)
+	rendered, err := transformRoleBinding(&obj, types.NamespacedName{Name: "operator", Namespace: "system"}, true)
 	g.Expect(err).NotTo(HaveOccurred())
 
 	g.Expect(rendered).NotTo(ContainSubstring(`{{ default (include "chart.fullname" .) .Values.serviceAccount.name }}`))
@@ -234,7 +235,7 @@ func TestTransformDeployment_AddsConfigChecksumAnnotationWhenConfigMapPresent(t 
 	rendered, err := transformDeployment(&obj, true, true)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(rendered).To(ContainSubstring(
-		`opendatahub.io/config-checksum: {{ include (print $.Template.BasePath "/core_v1_configmap.yaml") . | sha256sum }}`,
+		`checksum/config: {{ include (print $.Template.BasePath "/core_v1_configmap.yaml") . | sha256sum }}`,
 	))
 }
 
@@ -245,7 +246,7 @@ func TestTransformDeployment_OmitsConfigChecksumAnnotationWithoutConfigMap(t *te
 
 	rendered, err := transformDeployment(&obj, false, true)
 	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(rendered).NotTo(ContainSubstring("config-checksum"))
+	g.Expect(rendered).NotTo(ContainSubstring("checksum/config"))
 }
 
 // replaceNamespace only ever touches a resource's own top-level

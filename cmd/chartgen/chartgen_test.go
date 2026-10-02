@@ -74,7 +74,8 @@ func TestRun_RemovesStaleTemplatesOnRegeneration(t *testing.T) {
 
 	outputDir := t.TempDir()
 
-	g.Expect(run(strings.NewReader(deploymentAndRoleBindingManifest), outputDir, "test", "0.1.0")).To(Succeed())
+	initialManifest := deploymentAndRoleBindingManifest + "\n---\n" + databaseServiceCRDManifest
+	g.Expect(run(strings.NewReader(initialManifest), outputDir, "test", "0.1.0")).To(Succeed())
 
 	templatesDir := filepath.Join(outputDir, templatesDirName)
 	entries, err := os.ReadDir(templatesDir)
@@ -87,6 +88,45 @@ func TestRun_RemovesStaleTemplatesOnRegeneration(t *testing.T) {
 	entries, err = os.ReadDir(templatesDir)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(namesOf(entries)).NotTo(ContainElement(ContainSubstring("rolebinding")))
+	crdEntries, err := os.ReadDir(filepath.Join(outputDir, crdsDirName))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(crdEntries).To(BeEmpty())
+}
+
+const databaseServiceCRDManifest = `
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: databaseservices.services.platform.opendatahub.io
+spec:
+  group: services.platform.opendatahub.io
+  names:
+    kind: DatabaseService
+    plural: databaseservices
+    singular: databaseservice
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+`
+
+func TestRun_WritesCRDsToHelmCRDDirectory(t *testing.T) {
+	g := NewWithT(t)
+	outputDir := t.TempDir()
+	manifest := deploymentOnlyManifest + "\n---\n" + databaseServiceCRDManifest
+	g.Expect(run(strings.NewReader(manifest), outputDir, "test", "0.1.0")).To(Succeed())
+
+	crdPath := filepath.Join(outputDir, crdsDirName, "apiextensions.k8s.io_v1_customresourcedefinition.yaml")
+	crd, err := os.ReadFile(crdPath)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(string(crd)).To(ContainSubstring("kind: CustomResourceDefinition"))
+
+	_, err = os.Stat(filepath.Join(outputDir, templatesDirName, "apiextensions.k8s.io_v1_customresourcedefinition.yaml"))
+	g.Expect(os.IsNotExist(err)).To(BeTrue())
 }
 
 // A failed upstream producer in the documented `kustomize build ... |
@@ -385,7 +425,7 @@ func TestRun_DoesNotReferenceExternalConfigMapInChecksum(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	rendered := string(data)
 
-	g.Expect(rendered).NotTo(ContainSubstring("config-checksum"))
+	g.Expect(rendered).NotTo(ContainSubstring("checksum/config"))
 	g.Expect(rendered).NotTo(ContainSubstring("core_v1_configmap.yaml"))
 
 	// No ConfigMap resource exists in this input at all, so no
@@ -540,6 +580,16 @@ data:
   foo: bar
 `
 
+func deploymentWithHashedOperatorConfigMap(name string) string {
+	manifest := strings.Replace(
+		deploymentWithTwoConfigMapsManifest,
+		"          name: config\n",
+		"          name: "+name+"\n",
+		1,
+	)
+	return strings.Replace(manifest, "metadata:\n  name: config\n", "metadata:\n  name: "+name+"\n", 1)
+}
+
 // Only the ConfigMap the Deployment actually mounts is "the" operator
 // configuration. A second, unrelated ConfigMap in the same input must keep
 // its own literal data in the generated chart, not get overwritten with the
@@ -555,8 +605,88 @@ func TestRun_OnlyTemplatesOperatorConfigMap(t *testing.T) {
 	rendered := string(data)
 
 	g.Expect(rendered).To(ContainSubstring("platformType: {{"))
+	g.Expect(rendered).To(ContainSubstring(`if and (ne $key "platformType") (ne $key "platformVersion")`))
 	g.Expect(rendered).To(ContainSubstring("foo: bar"))
 	g.Expect(rendered).NotTo(ContainSubstring("bar: {{"))
+}
+
+func TestRun_UsesStableNameForKustomizeGeneratedOperatorConfigMap(t *testing.T) {
+	g := NewWithT(t)
+
+	const hashedConfigMapName = "config-55t5fmg58h"
+	manifest := deploymentWithHashedOperatorConfigMap(hashedConfigMapName)
+
+	outputDir := t.TempDir()
+	g.Expect(run(strings.NewReader(manifest), outputDir, "test", "0.1.0")).To(Succeed())
+
+	deployment, err := os.ReadFile(filepath.Join(outputDir, templatesDirName, "apps_v1_deployment.yaml"))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(string(deployment)).To(ContainSubstring(
+		"checksum/config: {{ include (print $.Template.BasePath \"/core_v1_configmap.yaml\") . | sha256sum }}",
+	))
+	g.Expect(string(deployment)).To(ContainSubstring("name: config"))
+	g.Expect(string(deployment)).NotTo(ContainSubstring(hashedConfigMapName))
+
+	configMap, err := os.ReadFile(filepath.Join(outputDir, templatesDirName, "core_v1_configmap.yaml"))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(string(configMap)).To(ContainSubstring("name: config"))
+	g.Expect(string(configMap)).NotTo(ContainSubstring(hashedConfigMapName))
+}
+
+func TestRun_RejectsCollidingStableConfigMapNames(t *testing.T) {
+	g := NewWithT(t)
+	manifest := deploymentWithHashedOperatorConfigMap("operator-config-1234567890")
+	manifest = strings.Replace(manifest, "name: unrelated-configmap\n", "name: operator-config\n", 1)
+
+	err := run(strings.NewReader(manifest), t.TempDir(), "test", "0.1.0")
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("ConfigMap name collision"))
+	g.Expect(err.Error()).To(ContainSubstring("operator-config-1234567890"))
+	g.Expect(err.Error()).To(ContainSubstring("operator-config"))
+}
+
+func TestRun_RejectsConfigMapsWithSameEmittedNameAcrossNamespaces(t *testing.T) {
+	g := NewWithT(t)
+	manifest := deploymentWithTwoConfigMapsManifest + `
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo
+  namespace: first-source-namespace
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foo
+  namespace: second-source-namespace
+`
+
+	err := run(strings.NewReader(manifest), t.TempDir(), "test", "0.1.0")
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("ConfigMap name collision"))
+	g.Expect(err.Error()).To(ContainSubstring("first-source-namespace/foo"))
+	g.Expect(err.Error()).To(ContainSubstring("second-source-namespace/foo"))
+}
+
+func TestRun_AllowsDistinctEmittedConfigMapNamesWithHashLikeSuffix(t *testing.T) {
+	g := NewWithT(t)
+	manifest := deploymentWithTwoConfigMapsManifest + `
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auxiliary-1234567890
+  namespace: first-source-namespace
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auxiliary
+  namespace: second-source-namespace
+`
+
+	g.Expect(run(strings.NewReader(manifest), t.TempDir(), "test", "0.1.0")).To(Succeed())
 }
 
 const deploymentWithAuxiliaryServiceAccountManifest = `

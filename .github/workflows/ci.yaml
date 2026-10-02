@@ -16,6 +16,7 @@ env:
   GOLANGCI_LINT_VERSION: v2.6.0
   SETUP_ENVTEST_VERSION: release-0.20
   ENVTEST_K8S_VERSION: "1.31.0"
+  HELM_VERSION: v3.19.0
 
 jobs:
   lint:
@@ -88,6 +89,85 @@ jobs:
             git diff
             exit 1
           fi
+
+  helm:
+    name: Helm Chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Helm ${{ env.HELM_VERSION }}
+        run: |
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o "$RUNNER_TEMP/helm.tar.gz"
+          tar -xzf "$RUNNER_TEMP/helm.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$RUNNER_TEMP/helm-bin"
+          install -m 0755 "$RUNNER_TEMP/linux-amd64/helm" "$RUNNER_TEMP/helm-bin/helm"
+          echo "$RUNNER_TEMP/helm-bin" >> "$GITHUB_PATH"
+          helm version --short
+
+      - name: Install controller-gen and kustomize
+        run: |
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@${{ env.CONTROLLER_GEN_VERSION }}
+          go install sigs.k8s.io/kustomize/kustomize/v5@${{ env.KUSTOMIZE_VERSION }}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Generate and lint Helm chart
+        run: make helm
+
+      - name: Fail on chart generation drift
+        run: |
+          if [ -n "$(git status --porcelain -- config/chart/)" ]; then
+            echo "::error::'make helm' produced changes in config/chart/ -- run it locally and commit the result:"
+            git status --porcelain -- config/chart/
+            git diff -- config/chart/
+            exit 1
+          fi
+
+      - name: Assert rendered resource set matches AC2
+        shell: bash
+        run: |
+          set -euo pipefail
+          rendered="$(mktemp)"
+          trap 'rm -f "$rendered"' EXIT
+          helm template opendatahub-db-operator config/chart --include-crds > "$rendered"
+
+          actual_resources="$(awk '
+            /^kind: / { kind = $2 }
+            /^metadata:$/ { in_metadata = 1; next }
+            in_metadata && /^  name: / {
+              print kind "/" $2
+              in_metadata = 0
+            }
+          ' "$rendered" | LC_ALL=C sort)"
+          expected_resources="$(cat <<'EOF'
+          ClusterRole/odh-db-operator-manager-role
+          ClusterRole/odh-db-operator-metrics-auth-role
+          ClusterRole/odh-db-operator-metrics-reader
+          ClusterRoleBinding/odh-db-operator-manager-rolebinding
+          ClusterRoleBinding/odh-db-operator-metrics-auth-rolebinding
+          ConfigMap/odh-db-operator-config
+          CustomResourceDefinition/databaseservices.services.platform.opendatahub.io
+          Deployment/odh-db-operator-operator
+          Role/odh-db-operator-leader-election-role
+          RoleBinding/odh-db-operator-leader-election-rolebinding
+          Service/odh-db-operator-metrics-service
+          ServiceAccount/opendatahub-db-operator
+          EOF
+          )"
+
+          if [[ "$actual_resources" != "$expected_resources" ]]; then
+            echo "::error::Rendered Helm resource set differs from the exact AC2 set (12 resources expected)."
+            diff -u <(printf '%s\n' "$expected_resources") <(printf '%s\n' "$actual_resources") || true
+            exit 1
+          fi
+
+          echo "Rendered resource set matches AC2 (12 resources):"
+          printf '%s\n' "$actual_resources"
 
   test:
     name: Unit Tests

@@ -9,5 +9,30 @@ infrastructure CRDs consumers use to request schemas and database claims.
 ## Development
 
 - `make build` — build the manager binary.
-- `make test` — run the unit and integration test suites.
+- `make test` — run unit tests only; it excludes `test/integration`, `test/envtest`, and `test/e2e`. Use
+  `make test-integration`, `make test-envtest`, or `make test-e2e` to run those suites.
 - `make lint` — run static analysis via `golangci-lint`.
+
+## Installing this chart
+
+The chart has no namespace setting in `values.yaml`; install it into the namespace this operator uses elsewhere
+in this repo's kustomize bundle (`odh-db-operator-system`), or your own choice of namespace:
+
+```sh
+helm install opendatahub-db-operator config/chart --create-namespace --namespace odh-db-operator-system
+```
+
+After installation, apply the cluster-scoped `DatabaseService` singleton and wait for it to reconcile to Ready:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: services.platform.opendatahub.io/v1alpha1
+kind: DatabaseService
+metadata:
+  name: default-db-operator
+EOF
+kubectl wait --for=condition=Ready databaseservice/default-db-operator --timeout=5m
+```
+
+Helm installs the `DatabaseService` CRD from `crds/` on the first install, but does not apply CRD changes on
+upgrade. Apply an updated schema separately with `kubectl apply -f config/chart/crds/` alongside `helm upgrade`.

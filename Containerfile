@@ -20,6 +20,8 @@ RUN go mod download
 # Copy only the source needed to build the manager binary.
 COPY cmd/ cmd/
 COPY pkg/ pkg/
+COPY api/ api/
+COPY internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
     go build -o /workspace/bin/manager ./cmd/main.go
