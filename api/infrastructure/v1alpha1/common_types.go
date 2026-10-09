@@ -22,7 +22,7 @@ import (
 )
 
 // AccessMode is the set of privileges granted to a claim's provisioned user
-// (docs/plan.md §5).
+// after provisioning.
 type AccessMode string
 
 const (
@@ -33,7 +33,6 @@ const (
 )
 
 // DeletionPolicy governs schema/data lifecycle on claim deletion.
-// (docs/plan.md §5).
 type DeletionPolicy string
 
 const (
@@ -62,7 +61,7 @@ const (
 // ProviderRef selects a DatabaseProvider by exact name or by a label
 // selector matched against DatabaseProvider capability labels -- mutually
 // exclusive, enforced by the CEL rule below (mirrors PVC.spec.storageClassName
-// vs PVC.spec.selector, docs/plan.md §1).
+// versus PVC.spec.selector).
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.name) ? 1 : 0) + (has(self.selector) ? 1 : 0) == 1",message="exactly one of name or selector must be set"
 type ProviderRef struct {
@@ -73,13 +72,13 @@ type ProviderRef struct {
 	// Selector matches against DatabaseProvider capability labels. When
 	// multiple providers match, the one with the highest
 	// db.infrastructure.opendatahub.io/selection-priority annotation wins,
-	// ties broken alphabetically by name (docs/plan.md §6).
+	// ties broken alphabetically by name.
 	// +optional
 	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 }
 
 // ConnectionStatus is the common connection surface shared by both claim
-// kinds' status.connection (docs/plan.md §5). SchemaConnectionStatus and
+// kinds' status.connection. SchemaConnectionStatus and
 // DatabaseConnectionStatus embed this and add only the fields that
 // legitimately differ (Schema is meaningless for a DatabaseClaim -- see the
 // comment on DatabaseConnectionStatus). All three fields here are required:

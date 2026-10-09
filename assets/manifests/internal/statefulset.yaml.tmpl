@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{.Service.Name}}
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/name: {{.Service.Name}}
+    app.kubernetes.io/component: databaseprovider
+    db.infrastructure.opendatahub.io/provider: {{.ProviderName}}
+spec:
+  replicas: 1
+  serviceName: {{.Service.Name}}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{.Service.Name}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{.Service.Name}}
+        db.infrastructure.opendatahub.io/provider: {{.ProviderName}}
+{{- if .Postgres.InstanceHash}}
+      annotations:
+        db.infrastructure.opendatahub.io/admin-secret-key: {{.Postgres.InstanceHash}}
+{{- if and .TLS.Enabled .TLS.SecretHash}}
+        db.infrastructure.opendatahub.io/tls-secret-hash: {{.TLS.SecretHash}}
+{{- end}}
+{{- end}}
+    spec:
+{{- if .TLS.Enabled}}
+      securityContext:
+        fsGroup: 999
+{{- end}}
+      containers:
+        - name: postgres
+          image: {{.Postgres.Image}}
+          imagePullPolicy: IfNotPresent
+{{- if .TLS.Enabled}}
+          args:
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/var/lib/postgresql/tls/tls.crt
+            - -c
+            - ssl_key_file=/var/lib/postgresql/tls/tls.key
+{{- end}}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{.Postgres.AdminSecretName}}
+                  key: user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{.Postgres.AdminSecretName}}
+                  key: password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{.Postgres.AdminSecretName}}
+                  key: dbname
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+{{- with .Postgres.Envs }}
+{{ toYaml . | nindent 12 }}
+{{- end }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+{{- with .Postgres.Resources }}
+          resources:{{ toYaml . | nindent 12 }}
+{{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+{{- if .TLS.Enabled}}
+            - name: tls
+              mountPath: /var/lib/postgresql/tls
+              readOnly: true
+{{- end}}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{.PVC.Name}}
+        - name: initdb
+          configMap:
+            name: {{.InitDB.ConfigMapName}}
+{{- if .TLS.Enabled}}
+        - name: tls
+          secret:
+            secretName: {{.TLS.SecretName}}
+            defaultMode: 416
+{{- end}}

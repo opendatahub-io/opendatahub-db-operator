@@ -22,6 +22,7 @@ COPY cmd/ cmd/
 COPY pkg/ pkg/
 COPY api/ api/
 COPY internal/ internal/
+COPY assets/ assets/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-$(go env GOARCH)} \
     go build -o /workspace/bin/manager ./cmd/main.go

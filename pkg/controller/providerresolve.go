@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package providerresolve contains the shared DatabaseProvider selection
-// helper used by SchemaClaim and DatabaseClaim reconcilers (docs/plan.md §6).
+// Package providerresolve contains helpers for selecting a DatabaseProvider
+// from a claim's provider reference.
 package controller
 
 import (
@@ -51,7 +51,7 @@ func (e ErrNotFound) Error() string { return e.Message }
 // ErrNotFound when no valid provider exists (caller turns this into a Pending
 // condition).
 //
-// Resolution order (docs/plan.md §6):
+// Resolution order:
 //  1. ref.Name set → exact Get
 //  2. ref.Selector set → List + priority/name sort → winner
 func Resolve(

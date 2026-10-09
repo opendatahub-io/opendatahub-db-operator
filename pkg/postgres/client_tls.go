@@ -31,7 +31,12 @@ func poolConfigFor(cfg Config) (*pgxpool.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing DSN: %w", err)
 	}
-	if err := applyRuntimeTLSConfig(poolConfig.ConnConfig, cfg.SSLMode, cfg.SSLRootCert); err != nil {
+	if err := applyRuntimeTLSConfig(
+		poolConfig.ConnConfig,
+		cfg.SSLMode,
+		cfg.SSLRootCert,
+		cfg.TLSConfigMutator,
+	); err != nil {
 		return nil, err
 	}
 	return poolConfig, nil
@@ -41,19 +46,20 @@ func applyRuntimeTLSConfig(
 	connConfig *pgx.ConnConfig,
 	sslMode string,
 	sslRootCert string,
+	mutator func(*tls.Config),
 ) error {
 	if connConfig == nil {
 		return nil
 	}
 
-	tlsConfig, err := runtimeTLSConfig(connConfig.TLSConfig, connConfig.Host, sslMode, sslRootCert)
+	tlsConfig, err := runtimeTLSConfig(connConfig.TLSConfig, connConfig.Host, sslMode, sslRootCert, mutator)
 	if err != nil {
 		return err
 	}
 	connConfig.TLSConfig = tlsConfig
 
 	for _, fallback := range connConfig.Fallbacks {
-		tlsConfig, err := runtimeTLSConfig(fallback.TLSConfig, fallback.Host, sslMode, sslRootCert)
+		tlsConfig, err := runtimeTLSConfig(fallback.TLSConfig, fallback.Host, sslMode, sslRootCert, mutator)
 		if err != nil {
 			return err
 		}
@@ -68,9 +74,17 @@ func runtimeTLSConfig(
 	host string,
 	sslMode string,
 	sslRootCert string,
+	mutator func(*tls.Config),
 ) (*tls.Config, error) {
-	if sslRootCert == "" || base == nil {
+	if base == nil {
 		return base, nil
+	}
+	if sslRootCert == "" {
+		tlsConfig := base.Clone()
+		if mutator != nil {
+			mutator(tlsConfig)
+		}
+		return tlsConfig, nil
 	}
 
 	caCertPool := x509.NewCertPool()
@@ -100,6 +114,9 @@ func runtimeTLSConfig(
 		}
 	default:
 		tlsConfig.VerifyPeerCertificate = nil
+	}
+	if mutator != nil {
+		mutator(tlsConfig)
 	}
 
 	return tlsConfig, nil

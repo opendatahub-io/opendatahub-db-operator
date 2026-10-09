@@ -48,7 +48,7 @@ const (
 // runs: pkg/manager.New builds a real controller-runtime manager against the
 // connected cluster, leader election succeeds, and /healthz and /readyz
 // respond -- all before any CRD exists. This is the manager-startup proof
-// the whole phase hinges on (see docs/plan.md phase 1, verification rung 3).
+// needed to verify startup independently of CRD installation.
 func TestManagerStartsAndBecomesHealthy(t *testing.T) {
 	g := NewWithT(t)
 

@@ -90,6 +90,36 @@ func TestLoadProviderConfig_InternalUsesGeneratedAdminSecret(t *testing.T) {
 	}))
 }
 
+func TestLoadProviderConfig_InternalUsesProviderDefaultDatabaseWhenSecretOmitsIt(t *testing.T) {
+	g := NewWithT(t)
+
+	provider := &infraApi.DatabaseProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "sample-internal"},
+		Spec: infraApi.DatabaseProviderSpec{
+			Type:            infraApi.ProviderTypeInternal,
+			DefaultDatabase: "application",
+			Internal:        &infraApi.InternalProviderSpec{Namespace: "opendatahub-db"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      controller.InternalAdminSecretName(provider.Name),
+			Namespace: "opendatahub-db",
+		},
+		Data: map[string][]byte{
+			postgres.SecretKeyHost:     []byte("sample-internal.opendatahub-db.svc"),
+			postgres.SecretKeyPort:     []byte("5432"),
+			postgres.SecretKeyUser:     []byte("postgres"),
+			postgres.SecretKeyPassword: []byte("postgres"),
+		},
+	}
+	cli := fake.NewClientBuilder().WithScheme(providerConfigScheme()).WithObjects(secret).Build()
+
+	cfg, err := controller.LoadProviderConfig(context.Background(), cli, provider, "odh-db-operator-system")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(cfg.DBName).To(Equal("application"))
+}
+
 func TestLoadProviderConfig_ExternalUsesConnectionSecretRef(t *testing.T) {
 	g := NewWithT(t)
 

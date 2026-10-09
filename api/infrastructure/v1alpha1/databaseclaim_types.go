@@ -33,12 +33,12 @@ const (
 
 // Compile-time interface assertion -- required because DatabaseClaim is
 // reconciled via the generic reconciler.ReconcilerFor[T api.PlatformObject]
-// builder (docs/plan.md §6), same as every other module's CRD types.
+// builder, same as every other module's CRD types.
 var _ fwapi.PlatformObject = (*DatabaseClaim)(nil)
 
 // DatabaseConnectionStatus is the resolved connection surfaced to consumers
-// once a DatabaseClaim is Provisioned (docs/plan.md §5). Deliberately not
-// SchemaConnectionStatus: spec.md's DatabaseClaim status example has no
+// once a DatabaseClaim is Provisioned. Deliberately not SchemaConnectionStatus:
+// the DatabaseClaim status contract has no
 // "schema" key under connection at all, so this is its own, smaller type
 // rather than a shared type with an always-empty field.
 type DatabaseConnectionStatus struct {
@@ -87,7 +87,7 @@ type DatabaseClaimSpec struct {
 
 // DatabaseClaimStatus defines the observed state of DatabaseClaim. There is
 // no deletionPolicy field on the spec, so there is no corresponding status
-// concern either -- always-Retain semantics (docs/plan.md §5). Phase (human-
+// concern either -- always-Retain semantics. Phase (human-
 // readable summary only -- consumers must gate on conditions[type=Provisioned],
 // never on Phase) comes from the embedded common.Status, not a redundant
 // field here.
@@ -106,8 +106,8 @@ type DatabaseClaimStatus struct {
 
 	// Provider is the single DatabaseProvider ultimately selected when
 	// spec.provider.selector matched more than one candidate (highest
-	// selection-priority annotation, ties broken alphabetically by name --
-	// docs/plan.md §6). Only the winner is surfaced: a claim binds to exactly
+	// selection-priority annotation, ties broken alphabetically by name).
+	// Only the winner is surfaced: a claim binds to exactly
 	// one provider, so there's nothing to gain from also listing the
 	// candidates that lost.
 	// +optional

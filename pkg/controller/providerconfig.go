@@ -128,7 +128,7 @@ func loadInternalProviderConfig(
 		return postgres.Config{}, err
 	}
 
-	cfg, err := postgres.ParseSecret(secret.Data)
+	cfg, err := postgres.ParseAdminSecret(secret.Data)
 	if err != nil {
 		return postgres.Config{}, fmt.Errorf("parsing internal admin Secret: %w", err)
 	}

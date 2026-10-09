@@ -34,12 +34,12 @@ const (
 
 // Compile-time interface assertion -- required because DatabaseProvider is
 // reconciled via the generic reconciler.ReconcilerFor[T api.PlatformObject]
-// builder (docs/plan.md §6), same as every other module's CRD types.
+// builder, same as every other module's CRD types.
 var _ fwapi.PlatformObject = (*DatabaseProvider)(nil)
 
 // ProviderType selects which of DatabaseProviderSpec.External/Internal is
 // populated. Mutually exclusive with the other, enforced by CEL rules on
-// DatabaseProviderSpec below (docs/plan.md §5).
+// DatabaseProviderSpec below.
 type ProviderType string
 
 const (
@@ -48,13 +48,12 @@ const (
 	ProviderTypeExternal ProviderType = "External"
 
 	// ProviderTypeInternal is a controller-managed, single-instance
-	// PostgreSQL convenience -- not a DBaaS (docs/plan.md §2, §7).
+	// PostgreSQL convenience, not a DBaaS.
 	ProviderTypeInternal ProviderType = "Internal"
 )
 
 // ExternalProviderSpec points at an admin-managed PostgreSQL instance this
-// service validates connectivity to but never owns the lifecycle of
-// (docs/plan.md §6, task-04).
+// service checks for connectivity but does not manage.
 type ExternalProviderSpec struct {
 	// ConnectionSecretRef points at a Secret holding admin-level connection
 	// info, which may live in a different namespace than any claim (unlike
@@ -74,14 +73,17 @@ type ExternalProviderSpec struct {
 type CertManagerIssuerRef struct {
 	// Name is the metadata.name of the referenced issuer.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
 	// Kind defaults to Issuer when omitted.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	Kind string `json:"kind,omitempty"`
 
 	// Group defaults to cert-manager.io when omitted.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	Group string `json:"group,omitempty"`
 }
 
@@ -90,6 +92,7 @@ type CertManagerIssuerRef struct {
 type InternalProviderTLSCertificateSpec struct {
 	// SecretName overrides the cert-manager target Secret name.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	SecretName string `json:"secretName,omitempty"`
 
 	// Duration overrides the requested certificate lifetime.
@@ -122,36 +125,43 @@ type ProviderConnectionStatus struct {
 	Database string `json:"database,omitempty"`
 }
 
-// StorageSpec configures the Internal provider's PersistentVolumeClaim
-// (docs/plan.md §7.3).
+// StorageSpec configures the Internal provider's PersistentVolumeClaim.
 // +kubebuilder:validation:XValidation:rule="quantity(self.size).isGreaterThan(quantity('0'))",message="storage.size must be greater than zero"
+// +kubebuilder:validation:XValidation:rule="!quantity(self.size).isLessThan(quantity(oldSelf.size))",message="storage.size can only increase after provider creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.storageClassName) == has(self.storageClassName)",message="storageClassName cannot be added or removed after provider creation"
 type StorageSpec struct {
-	// Size is the requested PVC storage size.
+	// Size is the requested PVC storage size. It can only increase after creation.
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
 
-	// StorageClassName is passed through to the PVC verbatim when set.
+	// StorageClassName is passed through to the PVC verbatim when set. It cannot
+	// be changed after creation because the PVC is retained with its data.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="storageClassName is immutable after provider creation"
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
 // InternalProviderSpec configures a controller-owned, single-instance
-// PostgreSQL StatefulSet (docs/plan.md §7). There is deliberately no image
+// PostgreSQL StatefulSet. There is deliberately no image
 // field -- letting admins point a platform-managed instance at an arbitrary
 // image reopens supply-chain and support-surface problems; the image is
 // resolved from Extensions via pkg/config compiled defaults (task-08).
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.__namespace__) == has(self.__namespace__)",message="namespace cannot be added or removed after provider creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.extensions) == has(self.extensions)",message="extensions cannot be added or removed after provider creation"
 type InternalProviderSpec struct {
 	// Namespace overrides where the internal PostgreSQL resources are created.
-	// When unset, the operator namespace is used. Immutable once set.
+	// When unset, the operator namespace is used. Cannot be changed after creation.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="namespace is immutable once set"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="namespace is immutable after provider creation"
+	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`
 
 	// Storage configures the instance's PersistentVolumeClaim.
 	// +kubebuilder:validation:Required
 	Storage StorageSpec `json:"storage"`
 
-	// Resources are applied to the Postgres container.
+	// Resources override the internal PostgreSQL container defaults. Unspecified
+	// requests default to 500m CPU and 1Gi memory; limits default to 2 CPU and 4Gi memory.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
@@ -163,10 +173,10 @@ type InternalProviderSpec struct {
 	// Extensions lists PostgreSQL extensions to make available inside the
 	// internal instance. Each value selects a built-in container image:
 	// "vector" uses the pgvector image; all others use the standard
-	// PostgreSQL image. Immutable once set.
+	// PostgreSQL image. Cannot be changed after provider creation.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="extensions are immutable once set"
-	// +kubebuilder:validation:items:Enum=vector;pg_trgm;uuid_ossp;pgcrypto
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="extensions are immutable after provider creation"
+	// +kubebuilder:validation:items:Enum=vector;pg_trgm;uuid-ossp;pgcrypto
 	Extensions []string `json:"extensions,omitempty"`
 }
 
@@ -211,6 +221,7 @@ type DatabaseProviderSpec struct {
 	// or the built-in internal default database may still supply the value.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	DefaultDatabase string `json:"defaultDatabase,omitempty"`
 
 	// External configures a provider pointing at an admin-managed instance.
@@ -225,8 +236,8 @@ type DatabaseProviderSpec struct {
 }
 
 // DatabaseProviderStatus defines the observed state of DatabaseProvider.
-// Unlike the two claim kinds, spec.md's status example has no phase field --
-// common.Status's own Phase/Conditions/ObservedGeneration are sufficient.
+// Its embedded common.Status provides Phase, Conditions, and
+// ObservedGeneration.
 type DatabaseProviderStatus struct {
 	fwapi.Status                  `json:",inline"`
 	common.ComponentReleaseStatus `json:",inline"`
@@ -238,6 +249,10 @@ type DatabaseProviderStatus struct {
 	// TLS reports the resolved TLS state for the provider.
 	// +optional
 	TLS *ProviderTLSStatus `json:"tls,omitempty"`
+
+	// ServerVersion is the detected PostgreSQL server version. It does not gate binding.
+	// +optional
+	ServerVersion string `json:"serverVersion,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -247,6 +262,8 @@ type DatabaseProviderStatus struct {
 // +kubebuilder:printcolumn:name="Host",type=string,JSONPath=`.status.connection.host`,description="Resolved host"
 // +kubebuilder:printcolumn:name="Database",type=string,JSONPath=`.status.connection.database`,description="Resolved admin database"
 // +kubebuilder:printcolumn:name="Reachable",type=string,JSONPath=`.status.conditions[?(@.type=="Reachable")].status`,description="Reachable"
+// +kubebuilder:printcolumn:name="Server Version",type=string,JSONPath=`.status.serverVersion`,description="Detected PostgreSQL server version"
+// +kubebuilder:validation:XValidation:rule="self.spec.type != 'Internal' || self.metadata.name.matches('^[a-z]$|^[a-z]([-a-z0-9]{0,61}[a-z0-9])$')",message="Internal provider metadata.name must be a DNS-1035 label of at most 63 characters because it is used as the Service name"
 
 // DatabaseProvider is the Schema for the databaseproviders API.
 type DatabaseProvider struct {

@@ -15,8 +15,7 @@ limitations under the License.
 */
 
 // Package v1alpha1 contains API Schema definitions for the infrastructure
-// v1alpha1 API group: SchemaClaim, DatabaseClaim, DatabaseProvider
-// (docs/plan.md §5).
+// v1alpha1 API group: SchemaClaim, DatabaseClaim, DatabaseProvider.
 // +kubebuilder:object:generate=true
 // +groupName=infrastructure.opendatahub.io
 package v1alpha1

@@ -10,10 +10,14 @@
 !api/
 !internal/
 !pkg/
+!assets/
+!assets/manifests/
+!assets/manifests/internal/
 
 # Re-include Go source files (but not *_test.go)
 !**/*.go
 **/*_test.go
+!assets/manifests/internal/*.tmpl
 
 # Re-include Go module files
 !go.mod

@@ -19,15 +19,13 @@ limitations under the License.
 // import the platform's cluster-scoped GVK package
 // (odh-platform-utilities/framework/cluster/gvk) directly.
 //
-// Phase 1 only re-exports the generic Kubernetes kinds chartgen dispatches
-// on. The DatabaseService kind needs no entry here -- chart generation
-// doesn't special-case it. The infrastructure kinds (SchemaClaim/
-// DatabaseClaim/DatabaseProvider) are added alongside their API types in
-// RHOAIENG-96277, not here.
+// The DatabaseService kind needs no entry here because chart generation does
+// not special-case it.
 package gvk
 
 import (
 	fwgvk "github.com/opendatahub-io/odh-platform-utilities/framework/cluster/gvk"
+	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 )
 
 // Generic Kubernetes GVKs reused from the platform's cluster-scoped GVK
@@ -42,6 +40,16 @@ var (
 	RoleBinding                    = fwgvk.RoleBinding
 	MutatingWebhookConfiguration   = fwgvk.MutatingWebhookConfiguration
 	ValidatingWebhookConfiguration = fwgvk.ValidatingWebhookConfiguration
+	CertManagerIssuer              = fwgvk.CertManagerIssuer
 	CertManagerCertificate         = fwgvk.CertManagerCertificate
 	Secret                         = fwgvk.Secret
+)
+
+var (
+	SchemaClaim          = infraApi.SchemeGroupVersion.WithKind("SchemaClaim")
+	SchemaClaimList      = infraApi.SchemeGroupVersion.WithKind("SchemaClaimList")
+	DatabaseClaim        = infraApi.SchemeGroupVersion.WithKind("DatabaseClaim")
+	DatabaseClaimList    = infraApi.SchemeGroupVersion.WithKind("DatabaseClaimList")
+	DatabaseProvider     = infraApi.SchemeGroupVersion.WithKind("DatabaseProvider")
+	DatabaseProviderList = infraApi.SchemeGroupVersion.WithKind("DatabaseProviderList")
 )

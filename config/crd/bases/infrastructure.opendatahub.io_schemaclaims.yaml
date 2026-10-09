@@ -87,7 +87,7 @@ spec:
                       Selector matches against DatabaseProvider capability labels. When
                       multiple providers match, the one with the highest
                       db.infrastructure.opendatahub.io/selection-priority annotation wins,
-                      ties broken alphabetically by name (docs/plan.md §6).
+                      ties broken alphabetically by name.
                     properties:
                       matchExpressions:
                         description: matchExpressions is a list of label selector
@@ -278,8 +278,8 @@ spec:
                 description: |-
                   Provider is the single DatabaseProvider ultimately selected when
                   spec.provider.selector matched more than one candidate (highest
-                  selection-priority annotation, ties broken alphabetically by name --
-                  docs/plan.md §6). Only the winner is surfaced: a claim binds to exactly
+                  selection-priority annotation, ties broken alphabetically by name).
+                  Only the winner is surfaced: a claim binds to exactly
                   one provider, so there's nothing to gain from also listing the
                   candidates that lost.
                 type: string

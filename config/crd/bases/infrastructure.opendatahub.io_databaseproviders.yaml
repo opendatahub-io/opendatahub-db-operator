@@ -31,6 +31,10 @@ spec:
       jsonPath: .status.conditions[?(@.type=="Reachable")].status
       name: Reachable
       type: string
+    - description: Detected PostgreSQL server version
+      jsonPath: .status.serverVersion
+      name: Server Version
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -62,6 +66,7 @@ spec:
                   For external providers, this also supplies the default database when the
                   admin Secret omits pg.database. When unset, the provider Secret (external)
                   or the built-in internal default database may still supply the value.
+                maxLength: 63
                 minLength: 1
                 type: string
               external:
@@ -113,28 +118,31 @@ spec:
                       Extensions lists PostgreSQL extensions to make available inside the
                       internal instance. Each value selects a built-in container image:
                       "vector" uses the pgvector image; all others use the standard
-                      PostgreSQL image. Immutable once set.
+                      PostgreSQL image. Cannot be changed after provider creation.
                     items:
                       enum:
                       - vector
                       - pg_trgm
-                      - uuid_ossp
+                      - uuid-ossp
                       - pgcrypto
                       type: string
                     type: array
                     x-kubernetes-validations:
-                    - message: extensions are immutable once set
+                    - message: extensions are immutable after provider creation
                       rule: self == oldSelf
                   namespace:
                     description: |-
                       Namespace overrides where the internal PostgreSQL resources are created.
-                      When unset, the operator namespace is used. Immutable once set.
+                      When unset, the operator namespace is used. Cannot be changed after creation.
+                    maxLength: 63
                     type: string
                     x-kubernetes-validations:
-                    - message: namespace is immutable once set
+                    - message: namespace is immutable after provider creation
                       rule: self == oldSelf
                   resources:
-                    description: Resources are applied to the Postgres container.
+                    description: |-
+                      Resources override the internal PostgreSQL container defaults. Unspecified
+                      requests default to 500m CPU and 1Gi memory; limits default to 2 CPU and 4Gi memory.
                     properties:
                       claims:
                         description: |-
@@ -199,19 +207,29 @@ spec:
                         anyOf:
                         - type: integer
                         - type: string
-                        description: Size is the requested PVC storage size.
+                        description: Size is the requested PVC storage size. It can
+                          only increase after creation.
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
                       storageClassName:
-                        description: StorageClassName is passed through to the PVC
-                          verbatim when set.
+                        description: |-
+                          StorageClassName is passed through to the PVC verbatim when set. It cannot
+                          be changed after creation because the PVC is retained with its data.
                         type: string
+                        x-kubernetes-validations:
+                        - message: storageClassName is immutable after provider creation
+                          rule: self == oldSelf
                     required:
                     - size
                     type: object
                     x-kubernetes-validations:
                     - message: storage.size must be greater than zero
                       rule: quantity(self.size).isGreaterThan(quantity('0'))
+                    - message: storage.size can only increase after provider creation
+                      rule: '!quantity(self.size).isLessThan(quantity(oldSelf.size))'
+                    - message: storageClassName cannot be added or removed after provider
+                        creation
+                      rule: has(oldSelf.storageClassName) == has(self.storageClassName)
                   tls:
                     description: |-
                       TLS enables TLS for the internal PostgreSQL instance. Presence of this
@@ -232,6 +250,7 @@ spec:
                           secretName:
                             description: SecretName overrides the cert-manager target
                               Secret name.
+                            maxLength: 63
                             type: string
                         type: object
                       issuerRef:
@@ -240,13 +259,16 @@ spec:
                         properties:
                           group:
                             description: Group defaults to cert-manager.io when omitted.
+                            maxLength: 63
                             type: string
                           kind:
                             description: Kind defaults to Issuer when omitted.
+                            maxLength: 63
                             type: string
                           name:
                             description: Name is the metadata.name of the referenced
                               issuer.
+                            maxLength: 63
                             type: string
                         required:
                         - name
@@ -255,6 +277,11 @@ spec:
                 required:
                 - storage
                 type: object
+                x-kubernetes-validations:
+                - message: namespace cannot be added or removed after provider creation
+                  rule: has(oldSelf.__namespace__) == has(self.__namespace__)
+                - message: extensions cannot be added or removed after provider creation
+                  rule: has(oldSelf.extensions) == has(self.extensions)
               type:
                 description: Type selects which of External/Internal below is populated.
                 enum:
@@ -273,8 +300,8 @@ spec:
           status:
             description: |-
               DatabaseProviderStatus defines the observed state of DatabaseProvider.
-              Unlike the two claim kinds, spec.md's status example has no phase field --
-              common.Status's own Phase/Conditions/ObservedGeneration are sufficient.
+              Its embedded common.Status provides Phase, Conditions, and
+              ObservedGeneration.
             properties:
               conditions:
                 items:
@@ -374,6 +401,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              serverVersion:
+                description: ServerVersion is the detected PostgreSQL server version.
+                  It does not gate binding.
+                type: string
               tls:
                 description: TLS reports the resolved TLS state for the provider.
                 properties:
@@ -391,12 +422,15 @@ spec:
                     properties:
                       group:
                         description: Group defaults to cert-manager.io when omitted.
+                        maxLength: 63
                         type: string
                       kind:
                         description: Kind defaults to Issuer when omitted.
+                        maxLength: 63
                         type: string
                       name:
                         description: Name is the metadata.name of the referenced issuer.
+                        maxLength: 63
                         type: string
                     required:
                     - name
@@ -420,6 +454,10 @@ spec:
                 type: object
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: Internal provider metadata.name must be a DNS-1035 label of at
+            most 63 characters because it is used as the Service name
+          rule: self.spec.type != 'Internal' || self.metadata.name.matches('^[a-z]$|^[a-z]([-a-z0-9]{0,61}[a-z0-9])$')
     served: true
     storage: true
     subresources:

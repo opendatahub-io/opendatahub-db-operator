@@ -17,6 +17,7 @@ limitations under the License.
 package postgres
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
@@ -42,7 +43,7 @@ const (
 	SecretKeyCA = "ca.crt"
 	// SecretKeySSLMode holds the libpq sslmode value (e.g. "disable", "require",
 	// "verify-full"). Optional in the Secret; when absent, callers apply their own
-	// default ("disable" for embedded, "require" for external).
+	// default ("disable" for Internal, "require" for External).
 	SecretKeySSLMode = "sslmode"
 
 	// DefaultPort is the standard PostgreSQL port, used when port is absent.
@@ -57,8 +58,8 @@ const (
 )
 
 // Config holds the connection parameters parsed from or written to a Kubernetes
-// Secret (docs/plan.md §6). The bare-key convention keeps the Secret
-// envFrom-safe. The mapstructure tags match the SecretKey*
+// Secret. The bare-key convention keeps the Secret envFrom-safe. The
+// mapstructure tags match the SecretKey*
 // constants above. Schema and SSLMode are optional.
 type Config struct {
 	Host     string `mapstructure:"host"`
@@ -69,8 +70,9 @@ type Config struct {
 	Schema   string `mapstructure:"schema"`
 	// SSLRootCert stores PEM-encoded CA content from SecretKeyCA. Runtime
 	// helpers build the pgx TLS configuration directly from this content.
-	SSLRootCert string `mapstructure:"ca.crt"`
-	SSLMode     string `mapstructure:"sslmode"`
+	SSLRootCert      string            `mapstructure:"ca.crt"`
+	SSLMode          string            `mapstructure:"sslmode"`
+	TLSConfigMutator func(*tls.Config) `mapstructure:"-"`
 }
 
 func (c Config) TLSEnabled() bool {

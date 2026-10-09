@@ -83,7 +83,7 @@ func CreateDatabase(ctx context.Context, cli Client, database string) error {
 }
 
 // DropSchemaCascade drops a schema and all its contained objects. Used for
-// DeletionPolicy=Delete (docs/plan.md §6).
+// DeletionPolicy=Delete.
 func DropSchemaCascade(ctx context.Context, cli Client, schema string) error {
 	_, err := cli.Exec(ctx, fmt.Sprintf(sqlDropSchemaCascade, QuoteIdentifier(schema)))
 	return err
@@ -356,7 +356,7 @@ func RoleExists(ctx context.Context, cli Client, name string) (bool, error) {
 }
 
 // CreateExtensionIfNotExists runs CREATE EXTENSION IF NOT EXISTS for each name.
-// Used by the Embedded provider's bootstrap step (task-08).
+// Used by the Internal provider's bootstrap step.
 func CreateExtensionIfNotExists(ctx context.Context, cli Client, extensions []string) error {
 	for _, ext := range extensions {
 		if _, err := cli.Exec(ctx, fmt.Sprintf(sqlCreateExtensionIfNotExists, QuoteIdentifier(ext))); err != nil {

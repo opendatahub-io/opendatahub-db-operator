@@ -9,12 +9,39 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - apiextensions.k8s.io
   resources:
   - customresourcedefinitions
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - authentication.k8s.io
@@ -29,12 +56,80 @@ rules:
   verbs:
   - create
 - apiGroups:
+  - cert-manager.io
+  resources:
+  - certificates
+  - issuers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - config.openshift.io
+  resources:
+  - apiservers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - events.k8s.io
   resources:
   - events
   verbs:
   - create
   - patch
+- apiGroups:
+  - infrastructure.opendatahub.io
+  resources:
+  - databaseclaims
+  - schemaclaims
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - infrastructure.opendatahub.io
+  resources:
+  - databaseproviders
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - infrastructure.opendatahub.io
+  resources:
+  - databaseproviders/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - infrastructure.opendatahub.io
+  resources:
+  - databaseproviders/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - services.platform.opendatahub.io
   resources:

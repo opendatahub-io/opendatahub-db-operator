@@ -1,0 +1,610 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package databaseprovider
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	. "github.com/onsi/gomega"
+	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
+	odhtypes "github.com/opendatahub-io/odh-platform-utilities/framework/controller/types"
+	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
+	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
+	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
+	"github.com/opendatahub-io/opendatahub-db-operator/pkg/postgres"
+	"github.com/opendatahub-io/opendatahub-db-operator/pkg/resources/gvk"
+	configv1 "github.com/openshift/api/config/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+func TestReconcileExternalActionReportsUnavailableSecret(t *testing.T) {
+	g := NewWithT(t)
+	provider := externalProvider()
+	provider.Status.ServerVersion = "16.4"
+	cli := testClient(t)
+	rr := testRequest(t, cli, provider)
+
+	err := (&Controller{}).reconcileExternalAction(context.Background(), rr)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(provider.Status.ServerVersion).To(BeEmpty())
+	reachable := conditions.FindStatusCondition(provider, ConditionReachable)
+	g.Expect(reachable).NotTo(BeNil())
+	g.Expect(reachable.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(reachable.Reason).To(Equal("ConnectionSecretUnavailable"))
+	g.Expect(reachable.Message).To(ContainSubstring("external-admin"))
+	g.Expect(reachable.Message).To(ContainSubstring("Verify"))
+	ready := conditions.FindStatusCondition(provider, string(fwapi.ConditionTypeReady))
+	g.Expect(ready).NotTo(BeNil())
+	g.Expect(ready.Status).NotTo(Equal(metav1.ConditionTrue))
+}
+
+func TestReconcileExternalActionReportsInvalidSecretWithoutReturningError(t *testing.T) {
+	g := NewWithT(t)
+	provider := externalProvider()
+	provider.Status.ServerVersion = "16.4"
+	secret := externalAdminSecret()
+	secret.Data[postgres.SecretKeyPort] = []byte("not-a-port")
+	cli := testClient(t, secret)
+	rr := testRequest(t, cli, provider)
+
+	g.Expect((&Controller{}).reconcileExternalAction(context.Background(), rr)).To(Succeed())
+	g.Expect(provider.Status.ServerVersion).To(BeEmpty())
+	reachable := conditions.FindStatusCondition(provider, ConditionReachable)
+	g.Expect(reachable).NotTo(BeNil())
+	g.Expect(reachable.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(reachable.Reason).To(Equal("ConnectionSecretInvalid"))
+	g.Expect(reachable.Message).To(ContainSubstring("Correct the admin Secret"))
+	g.Expect(reachable.Message).NotTo(ContainSubstring("secret"))
+	tlsCondition := conditions.FindStatusCondition(provider, ConditionTLSConfiguration)
+	g.Expect(tlsCondition).NotTo(BeNil())
+	g.Expect(tlsCondition.Status).To(Equal(metav1.ConditionUnknown))
+	ready := conditions.FindStatusCondition(provider, string(fwapi.ConditionTypeReady))
+	g.Expect(ready).NotTo(BeNil())
+	g.Expect(ready.Status).NotTo(Equal(metav1.ConditionTrue))
+}
+
+func TestReconcileExternalActionFollowsChangedTLSProfileAndReportsMissingCertManager(t *testing.T) {
+	g := NewWithT(t)
+	cli := testClient(t,
+		externalAdminSecret(),
+		&configv1.APIServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+			Spec: configv1.APIServerSpec{TLSSecurityProfile: &configv1.TLSSecurityProfile{
+				Type: configv1.TLSProfileIntermediateType,
+			}},
+		},
+	)
+	var minimumVersions []uint16
+	var cipherSuites [][]uint16
+	factory := func(_ context.Context, cfg postgres.Config) (postgres.Client, error) {
+		tlsConfig := &tls.Config{}
+		cfg.TLSConfigMutator(tlsConfig)
+		minimumVersions = append(minimumVersions, tlsConfig.MinVersion)
+		cipherSuites = append(cipherSuites, append([]uint16(nil), tlsConfig.CipherSuites...))
+		return &fakePostgresClient{version: 160004}, nil
+	}
+	m := &Controller{Options: Options{PostgresClientFactory: factory}}
+	provider := externalProvider()
+
+	profiles := []*configv1.TLSSecurityProfile{
+		{Type: configv1.TLSProfileIntermediateType},
+		{
+			Type: configv1.TLSProfileCustomType,
+			Custom: &configv1.CustomTLSProfile{TLSProfileSpec: configv1.TLSProfileSpec{
+				MinTLSVersion: configv1.VersionTLS12,
+				Ciphers:       []string{"ECDHE-RSA-AES128-GCM-SHA256"},
+			}},
+		},
+	}
+	for index, profile := range profiles {
+		if index > 0 {
+			apiServer := &configv1.APIServer{}
+			g.Expect(cli.Get(context.Background(), client.ObjectKey{Name: "cluster"}, apiServer)).To(Succeed())
+			apiServer.Spec.TLSSecurityProfile = profile
+			g.Expect(cli.Update(context.Background(), apiServer)).To(Succeed())
+		}
+		rr := testRequest(t, cli, provider)
+		g.Expect(m.reconcileExternalAction(context.Background(), rr)).To(Succeed())
+	}
+
+	g.Expect(minimumVersions).To(Equal([]uint16{tls.VersionTLS12, tls.VersionTLS12}))
+	g.Expect(cipherSuites[0]).NotTo(Equal(cipherSuites[1]))
+	g.Expect(cipherSuites[1]).To(Equal([]uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}))
+	g.Expect(provider.Status.ServerVersion).To(Equal("16.4"))
+	g.Expect(provider.Status.Connection).To(Equal(infraApi.ProviderConnectionStatus{
+		Host:     "postgres.example.test",
+		Port:     5432,
+		Database: "postgres",
+	}))
+	g.Expect(provider.Status.TLS).To(Equal(&infraApi.ProviderTLSStatus{Enabled: true, Ready: true}))
+	reachable := conditions.FindStatusCondition(provider, ConditionReachable)
+	g.Expect(reachable.Status).To(Equal(metav1.ConditionTrue))
+	version := conditions.FindStatusCondition(provider, ConditionServerVersion)
+	g.Expect(version.Status).To(Equal(metav1.ConditionTrue))
+	degraded := conditions.FindStatusCondition(provider, ConditionTLSConfiguration)
+	g.Expect(degraded.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(degraded.Reason).To(Equal("CertManagerUnavailable"))
+	g.Expect(degraded.Message).To(ContainSubstring("cert-manager"))
+
+	crds := &apiextensionsv1.CustomResourceDefinitionList{}
+	g.Expect(cli.List(context.Background(), crds)).To(Succeed())
+	g.Expect(crds.Items).To(BeEmpty())
+}
+
+func TestReconcileExternalActionReportsUnsupportedTLSProfileCiphers(t *testing.T) {
+	g := NewWithT(t)
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gvk.CertManagerIssuer.GroupVersion()})
+	mapper.AddSpecific(
+		gvk.CertManagerIssuer,
+		gvk.CertManagerIssuer.GroupVersion().WithResource("issuers"),
+		gvk.CertManagerIssuer.GroupVersion().WithResource("issuer"),
+		meta.RESTScopeRoot,
+	)
+	mapper.AddSpecific(
+		gvk.CertManagerCertificate,
+		gvk.CertManagerCertificate.GroupVersion().WithResource("certificates"),
+		gvk.CertManagerCertificate.GroupVersion().WithResource("certificate"),
+		meta.RESTScopeRoot,
+	)
+	issuerCRD := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "issuers.cert-manager.io"}}
+	certificateCRD := &apiextensionsv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "certificates.cert-manager.io"}}
+	cli := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithRESTMapper(mapper).
+		WithObjects(
+			externalAdminSecret(),
+			&configv1.APIServer{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+				Spec: configv1.APIServerSpec{TLSSecurityProfile: &configv1.TLSSecurityProfile{
+					Type: configv1.TLSProfileCustomType,
+					Custom: &configv1.CustomTLSProfile{TLSProfileSpec: configv1.TLSProfileSpec{
+						MinTLSVersion: configv1.VersionTLS12,
+						Ciphers:       []string{"ECDHE-RSA-AES128-GCM-SHA256", "UNKNOWN-CIPHER-SENTINEL"},
+					}},
+				}},
+			},
+			issuerCRD,
+			certificateCRD,
+		).
+		Build()
+	m := &Controller{Options: Options{PostgresClientFactory: func(_ context.Context, _ postgres.Config) (postgres.Client, error) {
+		return &fakePostgresClient{version: 160004}, nil
+	}}}
+	provider := externalProvider()
+	rr := testRequest(t, cli, provider)
+
+	g.Expect(m.reconcileExternalAction(context.Background(), rr)).To(Succeed())
+	tlsCondition := conditions.FindStatusCondition(provider, ConditionTLSConfiguration)
+	g.Expect(tlsCondition).NotTo(BeNil())
+	g.Expect(tlsCondition.Status).To(Equal(metav1.ConditionTrue))
+	g.Expect(tlsCondition.Message).To(ContainSubstring("UNKNOWN-CIPHER-SENTINEL"))
+}
+
+func TestReconcileInternalActionNetworkPolicyAllowsOnlyProvisionedClaimNamespaces(t *testing.T) {
+	g := NewWithT(t)
+	provider := &infraApi.DatabaseProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "internal"},
+		Spec: infraApi.DatabaseProviderSpec{
+			Type: infraApi.ProviderTypeInternal,
+			Internal: &infraApi.InternalProviderSpec{
+				Namespace: "database-system",
+				Storage:   infraApi.StorageSpec{Size: resource.MustParse("1Gi")},
+			},
+		},
+	}
+	activeSchema := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "schema-active", Namespace: "workload-z"},
+		Spec:       infraApi.SchemaClaimSpec{Provider: infraApi.ProviderRef{Name: "internal"}},
+	}
+	activeSchema.Status.Conditions = []fwapi.Condition{{
+		Type: dbcontroller.ConditionProvisioned, Status: metav1.ConditionTrue,
+	}}
+	activeDatabase := &infraApi.DatabaseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "database-active", Namespace: "workload-a"},
+		Status:     infraApi.DatabaseClaimStatus{Provider: "internal"},
+	}
+	activeDatabase.Status.Conditions = []fwapi.Condition{{
+		Type: dbcontroller.ConditionProvisioned, Status: metav1.ConditionTrue,
+	}}
+	duplicateNamespace := &infraApi.DatabaseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "database-duplicate", Namespace: "workload-z"},
+		Spec:       infraApi.DatabaseClaimSpec{Provider: infraApi.ProviderRef{Name: "internal"}},
+	}
+	duplicateNamespace.Status.Conditions = []fwapi.Condition{{
+		Type: dbcontroller.ConditionProvisioned, Status: metav1.ConditionTrue,
+	}}
+	unprovisioned := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "schema-pending", Namespace: "workload-pending"},
+		Spec:       infraApi.SchemaClaimSpec{Provider: infraApi.ProviderRef{Name: "internal"}},
+	}
+	otherProvider := &infraApi.DatabaseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "database-other", Namespace: "workload-other"},
+		Spec:       infraApi.DatabaseClaimSpec{Provider: infraApi.ProviderRef{Name: "another-provider"}},
+	}
+	otherProvider.Status.Conditions = []fwapi.Condition{{
+		Type: dbcontroller.ConditionProvisioned, Status: metav1.ConditionTrue,
+	}}
+	cli := testClient(t, activeSchema, activeDatabase, duplicateNamespace, unprovisioned, otherProvider)
+	rr := testRequest(t, cli, provider)
+	m := &Controller{Options: Options{cfg: &moduleconfig.Config{Internal: moduleconfig.InternalConfig{PostgresImage: "postgres:16"}}}}
+
+	g.Expect(m.reconcileInternalAction(context.Background(), rr)).To(Succeed())
+	var policy *unstructured.Unstructured
+	for i := range rr.Resources {
+		if rr.Resources[i].GetKind() == "NetworkPolicy" {
+			policy = &rr.Resources[i]
+			break
+		}
+	}
+	g.Expect(policy).NotTo(BeNil(), "internal provider should render a NetworkPolicy")
+	if policy == nil {
+		return
+	}
+	renderedPolicy := &networkingv1.NetworkPolicy{}
+	g.Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(policy.Object, renderedPolicy)).To(Succeed())
+	g.Expect(renderedPolicy.Spec.Ingress).To(HaveLen(1))
+	g.Expect(renderedPolicy.Spec.Ingress[0].From).To(HaveLen(1))
+	selector := renderedPolicy.Spec.Ingress[0].From[0].NamespaceSelector
+	g.Expect(selector).NotTo(BeNil())
+	g.Expect(selector.MatchExpressions).To(ConsistOf(metav1.LabelSelectorRequirement{
+		Key:      "kubernetes.io/metadata.name",
+		Operator: metav1.LabelSelectorOpIn,
+		Values:   []string{"workload-a", "workload-z"},
+	}))
+}
+
+func TestReconcileInternalActionDefaultsPostgresResources(t *testing.T) {
+	tests := []struct {
+		name     string
+		provided corev1.ResourceRequirements
+		expected corev1.ResourceRequirements
+	}{
+		{
+			name: "no provider resources",
+			expected: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+		},
+		{
+			name: "partial provider resources override defaults",
+			provided: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("6Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("750m"),
+				},
+			},
+			expected: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("6Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("750m"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+		},
+		{
+			name: "explicit request above default limit",
+			provided: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3")},
+			},
+			expected: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("3"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("3"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+		},
+		{
+			name: "explicit limit below default request",
+			provided: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+			},
+			expected: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			provider := &infraApi.DatabaseProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "internal"},
+				Spec: infraApi.DatabaseProviderSpec{
+					Type: infraApi.ProviderTypeInternal,
+					Internal: &infraApi.InternalProviderSpec{
+						Namespace: "database-system",
+						Storage:   infraApi.StorageSpec{Size: resource.MustParse("1Gi")},
+						Resources: *tc.provided.DeepCopy(),
+					},
+				},
+			}
+			rr := testRequest(t, testClient(t), provider)
+			m := &Controller{Options: Options{cfg: &moduleconfig.Config{
+				Internal: moduleconfig.InternalConfig{PostgresImage: "postgres:16"},
+			}}}
+
+			g.Expect(m.reconcileInternalAction(context.Background(), rr)).To(Succeed())
+			var postgresContainer *corev1.Container
+			for i := range rr.Resources {
+				if rr.Resources[i].GetKind() != "StatefulSet" {
+					continue
+				}
+				statefulSet := &appsv1.StatefulSet{}
+				g.Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(rr.Resources[i].Object, statefulSet)).To(Succeed())
+				g.Expect(statefulSet.Spec.Template.Spec.Containers).To(HaveLen(1))
+				postgresContainer = &statefulSet.Spec.Template.Spec.Containers[0]
+				break
+			}
+			g.Expect(postgresContainer).NotTo(BeNil())
+			if postgresContainer == nil {
+				return
+			}
+			g.Expect(postgresContainer.Resources).To(Equal(tc.expected))
+			g.Expect(provider.Spec.Internal.Resources).To(Equal(tc.provided))
+		})
+	}
+}
+
+func TestReconcileExternalActionReportsUnreachableWithoutReturningError(t *testing.T) {
+	g := NewWithT(t)
+	provider := externalProvider()
+	provider.Status.ServerVersion = "15.8"
+	cli := testClient(t, externalAdminSecret())
+	clientCalls := 0
+	m := &Controller{Options: Options{PostgresClientFactory: func(_ context.Context, _ postgres.Config) (postgres.Client, error) {
+		clientCalls++
+		return &fakePostgresClient{pingErr: errors.New("network unreachable")}, nil
+	}}}
+	rr := testRequest(t, cli, provider)
+
+	g.Expect(m.reconcileExternalAction(context.Background(), rr)).To(Succeed())
+	g.Expect(clientCalls).To(Equal(1))
+	g.Expect(provider.Status.ServerVersion).To(BeEmpty())
+	reachable := conditions.FindStatusCondition(provider, ConditionReachable)
+	g.Expect(reachable.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(reachable.Message).To(ContainSubstring("network unreachable"))
+	g.Expect(reachable.Message).To(ContainSubstring("Verify"))
+	version := conditions.FindStatusCondition(provider, ConditionServerVersion)
+	g.Expect(version.Status).To(Equal(metav1.ConditionUnknown))
+	ready := conditions.FindStatusCondition(provider, string(fwapi.ConditionTypeReady))
+	g.Expect(ready.Status).NotTo(Equal(metav1.ConditionTrue))
+}
+
+func TestReconcileExternalActionKeepsOutOfRangeServerUsable(t *testing.T) {
+	g := NewWithT(t)
+	secret := externalAdminSecret()
+	secret.Data[postgres.SecretKeySSLMode] = []byte(postgres.SSLModeDisable)
+	cli := testClient(t, secret)
+	provider := externalProvider()
+	m := &Controller{Options: Options{PostgresClientFactory: func(_ context.Context, _ postgres.Config) (postgres.Client, error) {
+		return &fakePostgresClient{version: 180000}, nil
+	}}}
+	rr := testRequest(t, cli, provider)
+
+	g.Expect(m.reconcileExternalAction(context.Background(), rr)).To(Succeed())
+	g.Expect(provider.Status.ServerVersion).To(Equal("18.0"))
+	reachable := conditions.FindStatusCondition(provider, ConditionReachable)
+	g.Expect(reachable.Status).To(Equal(metav1.ConditionTrue))
+	version := conditions.FindStatusCondition(provider, ConditionServerVersion)
+	g.Expect(version.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(version.Message).To(ContainSubstring("outside the tested range"))
+	ready := conditions.FindStatusCondition(provider, string(fwapi.ConditionTypeReady))
+	g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+}
+
+func TestInternalReadinessRequiresExactlyOneReadyReplica(t *testing.T) {
+	for _, readyReplicas := range []int32{0, 1} {
+		t.Run(map[int32]string{0: "not ready", 1: "ready"}[readyReplicas], func(t *testing.T) {
+			g := NewWithT(t)
+			provider := &infraApi.DatabaseProvider{
+				ObjectMeta: metav1.ObjectMeta{Name: "internal"},
+				Spec: infraApi.DatabaseProviderSpec{
+					Type:     infraApi.ProviderTypeInternal,
+					Internal: &infraApi.InternalProviderSpec{Namespace: "database-system"},
+				},
+			}
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "internal", Namespace: "database-system"},
+				Status:     appsv1.StatefulSetStatus{ReadyReplicas: readyReplicas},
+			}
+			cli := testClient(t, sts)
+			m := &Controller{Options: Options{cfg: &moduleconfig.Config{}}}
+			rr := testRequest(t, cli, provider)
+			rr.Conditions.Mark(ConditionTLSConfiguration, metav1.ConditionTrue)
+
+			g.Expect(m.internalReadinessAction(context.Background(), rr)).To(Succeed())
+			reachable := conditions.FindStatusCondition(provider, ConditionReachable)
+			g.Expect(reachable).NotTo(BeNil())
+			if readyReplicas == 1 {
+				g.Expect(reachable.Status).To(Equal(metav1.ConditionTrue))
+			} else {
+				g.Expect(reachable.Status).To(Equal(metav1.ConditionFalse))
+			}
+			ready := conditions.FindStatusCondition(provider, string(fwapi.ConditionTypeReady))
+			if readyReplicas == 1 {
+				g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			} else {
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			}
+		})
+	}
+}
+
+func TestReconcileInternalActionReportsMissingCertManager(t *testing.T) {
+	g := NewWithT(t)
+	provider := &infraApi.DatabaseProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "internal"},
+		Spec: infraApi.DatabaseProviderSpec{
+			Type: infraApi.ProviderTypeInternal,
+			Internal: &infraApi.InternalProviderSpec{
+				Namespace: "database-system",
+				TLS:       &infraApi.InternalProviderTLSSpec{},
+			},
+		},
+	}
+	cli := testClient(t)
+	rr := testRequest(t, cli, provider)
+	m := &Controller{Options: Options{cfg: &moduleconfig.Config{}}}
+
+	g.Expect(m.reconcileInternalAction(context.Background(), rr)).To(Succeed())
+	tlsCondition := conditions.FindStatusCondition(provider, ConditionTLSConfiguration)
+	g.Expect(tlsCondition).NotTo(BeNil())
+	g.Expect(tlsCondition.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(tlsCondition.Reason).To(Equal("CertManagerUnavailable"))
+	g.Expect(tlsCondition.Message).To(ContainSubstring("cert-manager"))
+	g.Expect(rr.Resources).To(BeEmpty())
+}
+
+func externalProvider() *infraApi.DatabaseProvider {
+	return &infraApi.DatabaseProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "external"},
+		Spec: infraApi.DatabaseProviderSpec{
+			Type: infraApi.ProviderTypeExternal,
+			External: &infraApi.ExternalProviderSpec{
+				ConnectionSecretRef: corev1.SecretReference{Namespace: "database-system", Name: "external-admin"},
+			},
+		},
+	}
+}
+
+func externalAdminSecret() *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-admin", Namespace: "database-system"},
+		Data: map[string][]byte{
+			postgres.SecretKeyHost:     []byte("postgres.example.test"),
+			postgres.SecretKeyPort:     []byte("5432"),
+			postgres.SecretKeyUser:     []byte("admin"),
+			postgres.SecretKeyPassword: []byte("secret"),
+			postgres.SecretKeyDatabase: []byte("postgres"),
+			postgres.SecretKeySSLMode:  []byte(postgres.SSLModeRequire),
+		},
+	}
+}
+
+func testClient(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
+}
+
+func testScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{
+		corev1.AddToScheme,
+		appsv1.AddToScheme,
+		networkingv1.AddToScheme,
+		infraApi.AddToScheme,
+		configv1.AddToScheme,
+		apiextensionsv1.AddToScheme,
+	} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return scheme
+}
+
+func testRequest(t *testing.T, cli client.Client, provider *infraApi.DatabaseProvider) *odhtypes.ReconciliationRequest {
+	t.Helper()
+	aggregator, err := conditions.NewAggregator(
+		fwapi.ConditionTypeReady,
+		conditions.Dependent(fwapi.ConditionType(ConditionReachable), conditions.HealthyWhenTrue),
+		conditions.Dependent(fwapi.ConditionType(ConditionTLSConfiguration), conditions.HealthyWhenTrue),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &odhtypes.ReconciliationRequest{
+		Client:     cli,
+		Conditions: conditions.NewManager(provider, aggregator),
+		Instance:   provider,
+	}
+}
+
+type fakePostgresClient struct {
+	version int
+	pingErr error
+}
+
+func (c *fakePostgresClient) Config() postgres.Config { return postgres.Config{} }
+func (c *fakePostgresClient) Close()                  {}
+func (c *fakePostgresClient) Ping(context.Context) error {
+	return c.pingErr
+}
+func (c *fakePostgresClient) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+func (c *fakePostgresClient) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unexpected query")
+}
+func (c *fakePostgresClient) QueryRow(context.Context, string, ...any) (pgx.Row, error) {
+	return fakePostgresRow{version: c.version}, nil
+}
+
+type fakePostgresRow struct{ version int }
+
+func (r fakePostgresRow) Scan(dest ...any) error {
+	if len(dest) != 1 {
+		return errors.New("unexpected scan arguments")
+	}
+	version, ok := dest[0].(*int)
+	if !ok {
+		return errors.New("unexpected scan target")
+	}
+	*version = r.version
+	return nil
+}

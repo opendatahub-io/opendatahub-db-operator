@@ -86,7 +86,8 @@ test-envtest: manifests ## Run the envtest-based reconciler suite (no external c
 
 .PHONY: test-integration-setup
 test-integration-setup: manifests ## Prepare the cluster for integration tests.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
+	# Infrastructure CRDs are module operands and must not enter config/default or the Helm chart.
+	$(KUBECTL) apply -f config/crd/bases/
 
 .PHONY: test-integration-run
 test-integration-run: ## Run integration tests against the current kubeconfig context's cluster.

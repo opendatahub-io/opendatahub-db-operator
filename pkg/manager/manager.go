@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	configv1 "github.com/openshift/api/config/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -31,6 +32,7 @@ import (
 
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
+	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/databaseprovider"
 	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/databaseservice"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 )
@@ -49,6 +51,9 @@ func NewScheme() (*runtime.Scheme, error) {
 	}
 	if err := apiextensionsv1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("adding apiextensions scheme: %w", err)
+	}
+	if err := configv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("adding OpenShift config scheme: %w", err)
 	}
 	if err := infraApi.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("adding infrastructure scheme: %w", err)
@@ -103,6 +108,11 @@ func New(
 
 	if err := databaseservice.NewReconciler(ctx, mgr, cfg); err != nil {
 		return nil, fmt.Errorf("creating databaseservice reconciler: %w", err)
+	}
+	if err := databaseprovider.NewReconciler(ctx, mgr, cfg, databaseprovider.Options{
+		Recorder: mgr.GetEventRecorder(infraApi.DatabaseProviderResource),
+	}); err != nil {
+		return nil, fmt.Errorf("creating databaseprovider reconciler: %w", err)
 	}
 
 	if err := mgr.AddHealthzCheck(healthCheckName, healthz.Ping); err != nil {

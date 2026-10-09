@@ -43,7 +43,7 @@ type MigrateFn func(ctx context.Context, rr *odhtypes.ReconciliationRequest) err
 // is a no-op (used in controllers that have no migration logic yet).
 //
 // This follows the same platform-version-gating pattern every other module
-// operator uses (docs/plan.md §6), centralised here so individual controllers
+// operator uses, centralised here so individual controllers
 // don't each repeat the semver parsing / release lookup boilerplate.
 func UpgradeIfNeeded(fns ...MigrateFn) actions.Fn {
 	return func(ctx context.Context, rr *odhtypes.ReconciliationRequest) error {

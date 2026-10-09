@@ -32,11 +32,11 @@ const (
 
 // Compile-time interface assertion -- required because SchemaClaim is
 // reconciled via the generic reconciler.ReconcilerFor[T api.PlatformObject]
-// builder (docs/plan.md §6), same as every other module's CRD types.
+// builder, same as every other module's CRD types.
 var _ fwapi.PlatformObject = (*SchemaClaim)(nil)
 
 // SchemaConnectionStatus is the resolved connection surfaced to consumers
-// once a SchemaClaim is Provisioned (docs/plan.md §5). Embeds the fields
+// once a SchemaClaim is Provisioned. Embeds the fields
 // shared with DatabaseConnectionStatus (SecretRef/Host/Port) and adds
 // Database/Schema, both required for the same reason: never legitimately
 // empty once Connection itself is populated.
@@ -119,8 +119,8 @@ type SchemaClaimStatus struct {
 
 	// Provider is the single DatabaseProvider ultimately selected when
 	// spec.provider.selector matched more than one candidate (highest
-	// selection-priority annotation, ties broken alphabetically by name --
-	// docs/plan.md §6). Only the winner is surfaced: a claim binds to exactly
+	// selection-priority annotation, ties broken alphabetically by name).
+	// Only the winner is surfaced: a claim binds to exactly
 	// one provider, so there's nothing to gain from also listing the
 	// candidates that lost.
 	// +optional

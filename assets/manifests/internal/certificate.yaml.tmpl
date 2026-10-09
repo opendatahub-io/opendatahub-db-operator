@@ -1,0 +1,33 @@
+{{- if .TLS.Enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{.TLS.Certificate.Name}}
+  namespace: {{.Namespace}}
+  labels:
+    app.kubernetes.io/name: {{.Service.Name}}
+    app.kubernetes.io/component: databaseprovider
+    db.infrastructure.opendatahub.io/provider: {{.ProviderName}}
+spec:
+  secretName: {{.TLS.SecretName}}
+  secretTemplate:
+    labels:
+      db.infrastructure.opendatahub.io/provider: {{.ProviderName}}
+  dnsNames:
+    - {{.Service.Name}}.{{.Namespace}}.svc
+    - {{.Service.Name}}.{{.Namespace}}.svc.cluster.local
+  issuerRef:
+    name: {{.TLS.IssuerRef.Name}}
+{{- if .TLS.IssuerRef.Kind }}
+    kind: {{.TLS.IssuerRef.Kind}}
+{{- end }}
+{{- if .TLS.IssuerRef.Group }}
+    group: {{.TLS.IssuerRef.Group}}
+{{- end }}
+{{- with .TLS.Certificate.Duration }}
+  duration: {{ .String }}
+{{- end }}
+{{- with .TLS.Certificate.RenewBefore }}
+  renewBefore: {{ .String }}
+{{- end }}
+{{- end }}
