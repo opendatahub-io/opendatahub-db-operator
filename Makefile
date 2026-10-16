@@ -121,6 +121,9 @@ test-e2e-setup: test-e2e-context-check test-e2e-cert-manager ## Install cert-man
 .PHONY: test-e2e-run
 test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconciles DatabaseService, then clean up.
 	$(KUBECTL) get --raw=/readyz >/dev/null
+	# -count=1 bypasses go's test cache: this suite asserts live cluster state,
+	# so a cached result from a previous run against another cluster would be
+	# a false PASS.
 	@cleanup() { \
 		test_result=$$?; \
 		trap - EXIT; \
@@ -133,7 +136,7 @@ test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconci
 	ODH_E2E_NAMESPACE="$(E2E_NAMESPACE)" \
 	ODH_E2E_RELEASE="$(E2E_RELEASE)" \
 	ODH_E2E_OPERATOR_IMAGE="$(IMG)" \
-		go test ./test/e2e/... -v -timeout 10m -failfast
+		go test ./test/e2e/... -v -count=1 -timeout 10m -failfast
 
 .PHONY: test-e2e-teardown
 test-e2e-teardown: test-e2e-context-check ## Remove the e2e DatabaseService, Helm release, and namespace.
