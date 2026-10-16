@@ -790,6 +790,10 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: metrics-monitor
+spec:
+  endpoints:
+  - tlsConfig:
+      serverName: metrics-service.odh-db-operator-system.svc
 `
 	g.Expect(run(strings.NewReader(manifest), outputDir, "test", "0.1.0")).To(Succeed())
 
@@ -799,6 +803,7 @@ metadata:
 	rendered := string(data)
 	g.Expect(rendered).To(HavePrefix("{{- if .Values.monitoring.serviceMonitor.enabled }}"))
 	g.Expect(rendered).To(HaveSuffix("{{- end }}"))
+	g.Expect(rendered).To(ContainSubstring("serverName: metrics-service.{{ .Release.Namespace }}.svc"))
 }
 
 // Simulates a process killed exactly between publishPath's two renames: the

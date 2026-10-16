@@ -18,6 +18,7 @@ spec:
         configMap:
           key: service-ca.crt
           name: odh-db-operator-metrics-server-ca
+      serverName: odh-db-operator-metrics-service.{{ .Release.Namespace }}.svc
   selector:
     matchLabels:
       app.kubernetes.io/name: opendatahub-db-operator
