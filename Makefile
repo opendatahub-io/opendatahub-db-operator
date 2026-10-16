@@ -101,7 +101,7 @@ test-integration-run: ## Run integration tests against the current kubeconfig co
 test-integration: test-integration-setup test-integration-run ## Set up and run integration tests.
 
 .PHONY: test-e2e-setup
-test-e2e-setup: test-e2e-context-check ## Build/load the manager image and install the Helm chart into Kind.
+test-e2e-setup: test-e2e-context-check test-e2e-cert-manager ## Install cert-manager if absent, build/load the manager image, and install the Helm chart into Kind.
 	$(KUBECTL) get --raw=/readyz >/dev/null
 	$(MAKE) test-e2e-teardown
 	$(MAKE) container-build IMG="$(IMG)"
@@ -154,6 +154,16 @@ test-e2e-context-check:
 		exit 1; \
 	fi
 
+.PHONY: test-e2e-cert-manager
+test-e2e-cert-manager: test-e2e-context-check ## Install cert-manager into the Kind cluster if absent, then wait for it.
+	@if $(KUBECTL) get crd certificates.cert-manager.io >/dev/null 2>&1; then \
+		echo "cert-manager already installed; skipping"; \
+	else \
+		echo "installing cert-manager $(CERT_MANAGER_VERSION)"; \
+		$(KUBECTL) apply -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml; \
+	fi
+	$(KUBECTL) -n cert-manager wait --for=condition=Available deployment --all --timeout=300s
+
 .PHONY: test-e2e
 test-e2e: ## Set up and run e2e tests.
 	$(MAKE) test-e2e-setup
@@ -197,6 +207,9 @@ KIND_CLUSTER ?= db-operator-dev
 TEST_INTEGRATION_CONTEXT ?= kind-$(KIND_CLUSTER)
 E2E_NAMESPACE ?= opendatahub-db-operator-e2e
 E2E_RELEASE   ?= opendatahub-db-operator-e2e
+# Installed by test-e2e-cert-manager when absent: the chart's webhook serving
+# certificate and internal-provider TLS both require cert-manager on the cluster.
+CERT_MANAGER_VERSION ?= v1.17.2
 
 .PHONY: container-load-kind
 container-load-kind: ## Load $(IMG) into a Kind cluster. `kind load docker-image` doesn't work with the podman provider.
