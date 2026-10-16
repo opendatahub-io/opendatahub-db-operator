@@ -43,6 +43,7 @@ const (
 
 	tplReleaseNamespace   = "namespace: {{ .Release.Namespace }}"
 	tplServiceAccountName = `{{ default (include "chart.fullname" .) .Values.serviceAccount.name }}`
+	serviceMonitorGate    = `{{- if .Values.monitoring.serviceMonitor.enabled }}`
 
 	annotationCertManagerInjectCAFrom = "cert-manager.io/inject-ca-from"
 
@@ -237,6 +238,8 @@ func transformResource(
 		return transformWebhook(obj)
 	case gvk.CertManagerCertificate:
 		return transformCertificate(obj)
+	case gvk.ServiceMonitor:
+		return transformServiceMonitor(obj)
 	default:
 		return transformGeneric(obj)
 	}
@@ -780,6 +783,43 @@ func transformGeneric(obj *unstructured.Unstructured) (string, error) {
 	}
 
 	return raw, nil
+}
+
+func transformServiceMonitor(obj *unstructured.Unstructured) (string, error) {
+	raw, err := transformGeneric(obj)
+	if err != nil {
+		return "", err
+	}
+
+	raw = replaceServiceMonitorServerName(raw)
+
+	return serviceMonitorGate + "\n" + raw + "\n{{- end }}", nil
+}
+
+// replaceServiceMonitorServerName replaces the namespace segment in
+// tlsConfig.serverName with the Helm release namespace template.
+// serverName follows the pattern: <service>.<namespace>.svc[.cluster.local]
+func replaceServiceMonitorServerName(raw string) string {
+	lines := strings.Split(raw, "\n")
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if !strings.HasPrefix(trimmed, "serverName: ") || !strings.Contains(trimmed, ".svc") {
+			continue
+		}
+
+		value := strings.TrimPrefix(trimmed, "serverName: ")
+		parts := strings.SplitN(value, ".", 3)
+		if len(parts) < 3 {
+			continue
+		}
+
+		indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		lines[i] = indent + "serverName: " + parts[0] + ".{{ .Release.Namespace }}." + parts[2]
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // marshalResource marshals an unstructured resource to YAML.

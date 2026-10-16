@@ -8,10 +8,14 @@ resources:
 - ../manager
 - ../webhook
 - ../certmanager
+- ../prometheus
 - metrics_service.yaml
 
 patches:
 - path: manager_metrics_patch.yaml
+  target:
+    kind: Deployment
+- path: manager_metrics_cert_patch.yaml
   target:
     kind: Deployment
 - path: manager_webhook_patch.yaml
@@ -19,6 +23,19 @@ patches:
     kind: Deployment
 
 replacements:
+- source:
+    kind: ConfigMap
+    version: v1
+    name: metrics-server-ca
+    fieldPath: .metadata.name
+  targets:
+  - select:
+      kind: ServiceMonitor
+      group: monitoring.coreos.com
+      version: v1
+      name: metrics-monitor
+    fieldPaths:
+    - .spec.endpoints.0.tlsConfig.ca.configMap.name
 - source:
     kind: Service
     version: v1

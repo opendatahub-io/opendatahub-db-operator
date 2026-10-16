@@ -24,6 +24,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
@@ -72,6 +73,7 @@ func NewReconciler(
 			reconciler.WithDefaultRequeueAfter(retryInterval(cfg)),
 		).
 		WithAction(m.reportStatus).
+		WithConditions(conditions.Dependent(fwapi.ConditionType(ConditionProviderHealth), conditions.HealthyWhenTrue)).
 		Build(ctx)
 
 	return err

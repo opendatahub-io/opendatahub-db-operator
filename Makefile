@@ -101,7 +101,7 @@ test-integration-run: ## Run integration tests against the current kubeconfig co
 test-integration: test-integration-setup test-integration-run ## Set up and run integration tests.
 
 .PHONY: test-e2e-setup
-test-e2e-setup: test-e2e-context-check ## Build/load the manager image and install the Helm chart into Kind.
+test-e2e-setup: test-e2e-context-check test-e2e-cert-manager ## Install cert-manager if absent, build/load the manager image, and install the Helm chart into Kind.
 	$(KUBECTL) get --raw=/readyz >/dev/null
 	$(MAKE) test-e2e-teardown
 	$(MAKE) container-build IMG="$(IMG)"
@@ -109,7 +109,8 @@ test-e2e-setup: test-e2e-context-check ## Build/load the manager image and insta
 	$(HELM) install "$(E2E_RELEASE)" config/chart \
 		--namespace "$(E2E_NAMESPACE)" --create-namespace --atomic --wait --timeout 5m \
 		--set-string operator.image.ref="$(IMG)" \
-		--set-string operator.image.pullPolicy=IfNotPresent || { \
+		--set-string operator.image.pullPolicy=IfNotPresent \
+		--set monitoring.serviceMonitor.enabled=false || { \
 			install_status=$$?; \
 			if ! $(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m; then \
 				echo "e2e setup failed and namespace $(E2E_NAMESPACE) cleanup also failed" >&2; \
@@ -120,6 +121,9 @@ test-e2e-setup: test-e2e-context-check ## Build/load the manager image and insta
 .PHONY: test-e2e-run
 test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconciles DatabaseService, then clean up.
 	$(KUBECTL) get --raw=/readyz >/dev/null
+	# -count=1 bypasses go's test cache: this suite asserts live cluster state,
+	# so a cached result from a previous run against another cluster would be
+	# a false PASS.
 	@cleanup() { \
 		test_result=$$?; \
 		trap - EXIT; \
@@ -132,7 +136,7 @@ test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconci
 	ODH_E2E_NAMESPACE="$(E2E_NAMESPACE)" \
 	ODH_E2E_RELEASE="$(E2E_RELEASE)" \
 	ODH_E2E_OPERATOR_IMAGE="$(IMG)" \
-		go test ./test/e2e/... -v -timeout 10m -failfast
+		go test ./test/e2e/... -v -count=1 -timeout 10m -failfast
 
 .PHONY: test-e2e-teardown
 test-e2e-teardown: test-e2e-context-check ## Remove the e2e DatabaseService, Helm release, and namespace.
@@ -152,6 +156,16 @@ test-e2e-context-check:
 		echo "e2e requires kube context $$expected (current: $$context)" >&2; \
 		exit 1; \
 	fi
+
+.PHONY: test-e2e-cert-manager
+test-e2e-cert-manager: test-e2e-context-check ## Install cert-manager into the Kind cluster if absent, then wait for it.
+	@if $(KUBECTL) get crd certificates.cert-manager.io >/dev/null 2>&1; then \
+		echo "cert-manager already installed; skipping"; \
+	else \
+		echo "installing cert-manager $(CERT_MANAGER_VERSION)"; \
+		$(KUBECTL) apply -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml; \
+	fi
+	$(KUBECTL) -n cert-manager wait --for=condition=Available deployment --all --timeout=300s
 
 .PHONY: test-e2e
 test-e2e: ## Set up and run e2e tests.
@@ -196,6 +210,9 @@ KIND_CLUSTER ?= db-operator-dev
 TEST_INTEGRATION_CONTEXT ?= kind-$(KIND_CLUSTER)
 E2E_NAMESPACE ?= opendatahub-db-operator-e2e
 E2E_RELEASE   ?= opendatahub-db-operator-e2e
+# Installed by test-e2e-cert-manager when absent: the chart's webhook serving
+# certificate and internal-provider TLS both require cert-manager on the cluster.
+CERT_MANAGER_VERSION ?= v1.17.2
 
 .PHONY: container-load-kind
 container-load-kind: ## Load $(IMG) into a Kind cluster. `kind load docker-image` doesn't work with the podman provider.

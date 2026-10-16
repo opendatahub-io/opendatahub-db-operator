@@ -13,3 +13,13 @@ metadata:
     app.kubernetes.io/name: opendatahub-db-operator
   name: odh-databaseservice-config
   namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+  labels:
+    app.kubernetes.io/name: opendatahub-db-operator
+  name: odh-db-operator-metrics-server-ca
+  namespace: {{ .Release.Namespace }}
