@@ -24,6 +24,8 @@ limitations under the License.
 package gvk
 
 import (
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	fwgvk "github.com/opendatahub-io/odh-platform-utilities/framework/cluster/gvk"
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 )
@@ -43,6 +45,9 @@ var (
 	CertManagerIssuer              = fwgvk.CertManagerIssuer
 	CertManagerCertificate         = fwgvk.CertManagerCertificate
 	Secret                         = fwgvk.Secret
+	ServiceMonitor                 = schema.GroupVersionKind{
+		Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor",
+	}
 )
 
 var (

@@ -1,5 +1,8 @@
 config: {}
 imagePullSecrets: []
+monitoring:
+  serviceMonitor:
+    enabled: true
 operator:
   image:
     pullPolicy: Always

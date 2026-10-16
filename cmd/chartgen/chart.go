@@ -43,6 +43,7 @@ const (
 
 	tplReleaseNamespace   = "namespace: {{ .Release.Namespace }}"
 	tplServiceAccountName = `{{ default (include "chart.fullname" .) .Values.serviceAccount.name }}`
+	serviceMonitorGate    = `{{- if .Values.monitoring.serviceMonitor.enabled }}`
 
 	annotationCertManagerInjectCAFrom = "cert-manager.io/inject-ca-from"
 
@@ -237,6 +238,8 @@ func transformResource(
 		return transformWebhook(obj)
 	case gvk.CertManagerCertificate:
 		return transformCertificate(obj)
+	case gvk.ServiceMonitor:
+		return transformServiceMonitor(obj)
 	default:
 		return transformGeneric(obj)
 	}
@@ -780,6 +783,15 @@ func transformGeneric(obj *unstructured.Unstructured) (string, error) {
 	}
 
 	return raw, nil
+}
+
+func transformServiceMonitor(obj *unstructured.Unstructured) (string, error) {
+	raw, err := transformGeneric(obj)
+	if err != nil {
+		return "", err
+	}
+
+	return serviceMonitorGate + "\n" + raw + "\n{{- end }}", nil
 }
 
 // marshalResource marshals an unstructured resource to YAML.

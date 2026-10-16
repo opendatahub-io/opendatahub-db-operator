@@ -780,6 +780,27 @@ func TestRun_LeavesNoPublishingArtifactsBehind(t *testing.T) {
 	}
 }
 
+func TestRun_GatesServiceMonitor(t *testing.T) {
+	g := NewWithT(t)
+
+	outputDir := t.TempDir()
+	manifest := deploymentOnlyManifest + `
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metrics-monitor
+`
+	g.Expect(run(strings.NewReader(manifest), outputDir, "test", "0.1.0")).To(Succeed())
+
+	data, err := os.ReadFile(filepath.Join(outputDir, templatesDirName, "monitoring.coreos.com_v1_servicemonitor.yaml"))
+	g.Expect(err).NotTo(HaveOccurred())
+
+	rendered := string(data)
+	g.Expect(rendered).To(HavePrefix("{{- if .Values.monitoring.serviceMonitor.enabled }}"))
+	g.Expect(rendered).To(HaveSuffix("{{- end }}"))
+}
+
 // Simulates a process killed exactly between publishPath's two renames: the
 // destination is gone, but its backup (the previous, valid content) is
 // still sitting there. The next publishPath call for that same name must

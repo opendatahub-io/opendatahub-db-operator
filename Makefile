@@ -109,7 +109,8 @@ test-e2e-setup: test-e2e-context-check ## Build/load the manager image and insta
 	$(HELM) install "$(E2E_RELEASE)" config/chart \
 		--namespace "$(E2E_NAMESPACE)" --create-namespace --atomic --wait --timeout 5m \
 		--set-string operator.image.ref="$(IMG)" \
-		--set-string operator.image.pullPolicy=IfNotPresent || { \
+		--set-string operator.image.pullPolicy=IfNotPresent \
+		--set monitoring.serviceMonitor.enabled=false || { \
 			install_status=$$?; \
 			if ! $(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m; then \
 				echo "e2e setup failed and namespace $(E2E_NAMESPACE) cleanup also failed" >&2; \

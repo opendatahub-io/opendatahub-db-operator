@@ -28,6 +28,7 @@ import (
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
+	dbmetrics "github.com/opendatahub-io/opendatahub-db-operator/pkg/metrics"
 	"github.com/opendatahub-io/opendatahub-db-operator/pkg/postgres"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -56,7 +57,7 @@ func (m *Controller) reconcileExternalAction(ctx context.Context, rr *odhtypes.R
 		return m.markConnectionFailure(rr, obj, cfg, err)
 	}
 	reportExternalServerVersion(rr, obj, version)
-	rr.Conditions.Mark(ConditionReachable, metav1.ConditionTrue, conditions.WithReason("ConnectionVerified"), conditions.WithMessage("Connection verified"))
+	markReachable(rr, obj, metav1.ConditionTrue, conditions.WithReason("ConnectionVerified"), conditions.WithMessage("Connection verified"))
 	return nil
 }
 
@@ -68,8 +69,9 @@ func reportExternalConfigFailure(
 	obj.Status.Connection = infraApi.ProviderConnectionStatus{}
 	obj.Status.TLS = nil
 	obj.Status.ServerVersion = ""
+	dbmetrics.ClearProviderServerVersion(obj.Name)
 	reason := externalFailureReason(err)
-	rr.Conditions.Mark(ConditionReachable, metav1.ConditionFalse, conditions.WithReason(reason), conditions.WithMessage(err.Error()))
+	markReachable(rr, obj, metav1.ConditionFalse, conditions.WithReason(reason), conditions.WithMessage(err.Error()))
 	rr.Conditions.Mark(ConditionTLSConfiguration, metav1.ConditionUnknown, conditions.WithReason(reason), conditions.WithMessage(err.Error()))
 	rr.Conditions.Mark(ConditionServerVersion, metav1.ConditionUnknown,
 		conditions.WithReason(reason),
@@ -125,6 +127,7 @@ func (m *Controller) detectExternalServerVersion(ctx context.Context, cfg postgr
 
 func reportExternalServerVersion(rr *odhtypes.ReconciliationRequest, obj *infraApi.DatabaseProvider, version postgres.Version) {
 	obj.Status.ServerVersion = version.String()
+	dbmetrics.SetProviderServerVersion(obj.Name, version.String())
 	if !moduleconfig.TestedPostgresVersions.Contains(version) {
 		rr.Conditions.Mark(ConditionServerVersion, metav1.ConditionFalse,
 			conditions.WithReason("ServerVersionOutsideTestedRange"),
@@ -144,10 +147,11 @@ func (m *Controller) markConnectionFailure(
 ) error {
 	err = postgres.SanitizeError(err, cfg.Password)
 	obj.Status.ServerVersion = ""
+	dbmetrics.ClearProviderServerVersion(obj.Name)
 	rr.Conditions.Mark(ConditionServerVersion, metav1.ConditionUnknown,
 		conditions.WithReason(externalFailureReason(err)),
 		conditions.WithMessage("Server version is unavailable until a connection can be verified"))
-	rr.Conditions.Mark(ConditionReachable, metav1.ConditionFalse,
+	markReachable(rr, obj, metav1.ConditionFalse,
 		conditions.WithReason(externalFailureReason(err)),
 		conditions.WithMessagef("%s. Verify the admin Secret and that PostgreSQL is reachable from the operator namespace.", err.Error()))
 	if retryErr := dbcontroller.StopWithQuickRetryIfConnectionRefused(err); retryErr != nil {
