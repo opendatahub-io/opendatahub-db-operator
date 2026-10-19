@@ -63,6 +63,10 @@ func (m *Module) aggregateInputs(
 				conditions.WithSeverity(fwapi.ConditionSeverityInfo),
 				conditions.WithReason("DatabaseProviderCRDMissing"),
 				conditions.WithMessage(message))
+			rr.Conditions.Mark(ConditionServerVersion, metav1.ConditionUnknown,
+				conditions.WithSeverity(fwapi.ConditionSeverityInfo),
+				conditions.WithReason("DatabaseProviderCRDMissing"),
+				conditions.WithMessage("DatabaseProvider CRD is not installed; server versions are not available"))
 			rr.Conditions.Mark(fwapi.ConditionTypeDegraded, metav1.ConditionFalse,
 				conditions.WithSeverity(fwapi.ConditionSeverityInfo),
 				conditions.WithReason("DatabaseProviderCRDMissing"),
@@ -86,6 +90,10 @@ func (m *Module) aggregateInputs(
 			conditions.WithSeverity(fwapi.ConditionSeverityInfo),
 			conditions.WithReason("NoProvidersConfigured"),
 			conditions.WithMessage(message))
+		rr.Conditions.Mark(ConditionServerVersion, metav1.ConditionUnknown,
+			conditions.WithSeverity(fwapi.ConditionSeverityInfo),
+			conditions.WithReason("NoProvidersConfigured"),
+			conditions.WithMessage("No DatabaseProvider resources exist; server versions are not available"))
 		rr.Conditions.Mark(fwapi.ConditionTypeDegraded, metav1.ConditionFalse,
 			conditions.WithSeverity(fwapi.ConditionSeverityInfo),
 			conditions.WithReason("NoProvidersConfigured"),
@@ -143,6 +151,11 @@ func (m *Module) aggregateInputs(
 			conditions.WithSeverity(fwapi.ConditionSeverityInfo),
 			conditions.WithReason("ServerVersionOutsideTestedRange"),
 			conditions.WithMessage(strings.Join(outOfRangeMessages, "; ")))
+	} else {
+		rr.Conditions.Mark(ConditionServerVersion, metav1.ConditionTrue,
+			conditions.WithSeverity(fwapi.ConditionSeverityInfo),
+			conditions.WithReason("ServerVersionsWithinTestedRange"),
+			conditions.WithMessage("No DatabaseProvider reports a server version outside the tested range"))
 	}
 
 	return nil

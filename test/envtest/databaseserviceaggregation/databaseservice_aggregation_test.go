@@ -4,6 +4,7 @@ package databaseserviceaggregation
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -87,6 +88,17 @@ func TestDatabaseServiceAggregatesProviderStatus(t *testing.T) {
 	}
 	g.Expect(cli.Create(ctx, service)).To(Succeed())
 
+	// The first reconcile must run to completion before the subtests below:
+	// it registers the dynamic DatabaseProvider watch that later subtests rely
+	// on instead of manual reconcile triggers.
+	g.Eventually(func(g Gomega) {
+		got := &servicesv1alpha1.DatabaseService{}
+		g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(service), got)).To(Succeed())
+		providerHealth := conditions.FindStatusCondition(got, "ProviderHealth")
+		g.Expect(providerHealth).NotTo(BeNil())
+		g.Expect(providerHealth.Reason).To(Equal("NoProvidersConfigured"))
+	}).Should(Succeed())
+
 	provider := &infraApi.DatabaseProvider{
 		ObjectMeta: metav1.ObjectMeta{Name: "aggregation-provider"},
 		Spec: infraApi.DatabaseProviderSpec{
@@ -101,16 +113,30 @@ func TestDatabaseServiceAggregatesProviderStatus(t *testing.T) {
 		g := NewWithT(t)
 
 		g.Expect(cli.Create(ctx, provider)).To(Succeed())
-		provider.Status.Conditions = []fwapi.Condition{{
-			Type:    "Reachable",
-			Status:  metav1.ConditionFalse,
-			Reason:  "ConnectionFailed",
-			Message: "PostgreSQL is unreachable from the operator namespace. Check the admin Secret and network access.",
-		}}
-		g.Expect(cli.Status().Update(ctx, provider)).To(Succeed())
-		triggerServiceReconcile(t, ctx, cli, service)
 
-		eventuallyService(t, ctx, cli, service, func(g Gomega, got *servicesv1alpha1.DatabaseService) {
+		// The dynamic provider watch attaches asynchronously once the first
+		// reconcile registers it, so a single status write can be missed if it
+		// races the informer startup. Rewrite the status (unique message per
+		// attempt so each write bumps the resourceVersion) until the service
+		// re-aggregates; passing proves the watch is live, which the in-range
+		// subtest below also relies on.
+		var probe int
+		g.Eventually(func(g Gomega) {
+			probe++
+			g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(provider), provider)).To(Succeed())
+			provider.Status.Conditions = []fwapi.Condition{{
+				Type:   "Reachable",
+				Status: metav1.ConditionFalse,
+				Reason: "ConnectionFailed",
+				Message: fmt.Sprintf(
+					"PostgreSQL is unreachable from the operator namespace. Check the admin Secret and network access (probe %d)",
+					probe,
+				),
+			}}
+			g.Expect(cli.Status().Update(ctx, provider)).To(Succeed())
+
+			got := &servicesv1alpha1.DatabaseService{}
+			g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(service), got)).To(Succeed())
 			providerHealth := conditions.FindStatusCondition(got, "ProviderHealth")
 			g.Expect(providerHealth).NotTo(BeNil())
 			g.Expect(providerHealth.Status).To(Equal(metav1.ConditionFalse))
@@ -121,7 +147,11 @@ func TestDatabaseServiceAggregatesProviderStatus(t *testing.T) {
 			g.Expect(degraded).NotTo(BeNil())
 			g.Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(degraded.Message).To(ContainSubstring(`DatabaseProvider "aggregation-provider" is unreachable`))
-		})
+
+			// The provider reports no server version at all: unknown is not
+			// out-of-range, so the aggregated condition stays True.
+			expectServerVersion(g, got, metav1.ConditionTrue, "ServerVersionsWithinTestedRange")
+		}).Should(Succeed())
 	})
 
 	t.Run("out-of-range version is informational", func(t *testing.T) {
@@ -165,6 +195,32 @@ func TestDatabaseServiceAggregatesProviderStatus(t *testing.T) {
 		})
 	})
 
+	t.Run("in-range version is marked true", func(t *testing.T) {
+		g := NewWithT(t)
+
+		g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(provider), provider)).To(Succeed())
+		provider.Status.Conditions = []fwapi.Condition{
+			{
+				Type:    "Reachable",
+				Status:  metav1.ConditionTrue,
+				Reason:  "ConnectionVerified",
+				Message: "Connection verified",
+			},
+			{
+				Type:     "ServerVersion",
+				Status:   metav1.ConditionTrue,
+				Reason:   "ServerVersionSupported",
+				Severity: fwapi.ConditionSeverityInfo,
+				Message:  "PostgreSQL 16.4 is within the tested range",
+			},
+		}
+		g.Expect(cli.Status().Update(ctx, provider)).To(Succeed())
+
+		eventuallyService(t, ctx, cli, service, func(g Gomega, got *servicesv1alpha1.DatabaseService) {
+			expectServerVersion(g, got, metav1.ConditionTrue, "ServerVersionsWithinTestedRange")
+		})
+	})
+
 	t.Run("zero providers is distinct from healthy", func(t *testing.T) {
 		g := NewWithT(t)
 
@@ -190,6 +246,8 @@ func TestDatabaseServiceAggregatesProviderStatus(t *testing.T) {
 			g.Expect(degraded).NotTo(BeNil())
 			g.Expect(degraded.Status).To(Equal(metav1.ConditionFalse))
 			g.Expect(degraded.Message).To(ContainSubstring("No DatabaseProvider resources exist"))
+
+			expectServerVersion(g, got, metav1.ConditionUnknown, "NoProvidersConfigured")
 		})
 		g.Eventually(func(g Gomega) {
 			g.Expect(testutil.GatherAndCount(ctrlmetrics.Registry, "dbprovider_reachable")).To(Equal(0))
@@ -215,6 +273,19 @@ func triggerServiceReconcile(
 	annotations["test.opendatahub.io/reconcile"] = t.Name()
 	service.SetAnnotations(annotations)
 	g.Expect(cli.Update(ctx, service)).To(Succeed())
+}
+
+func expectServerVersion(
+	g Gomega,
+	obj *servicesv1alpha1.DatabaseService,
+	status metav1.ConditionStatus,
+	reason string,
+) {
+	version := conditions.FindStatusCondition(obj, "ServerVersion")
+	g.Expect(version).NotTo(BeNil())
+	g.Expect(version.Status).To(Equal(status))
+	g.Expect(version.Severity).To(Equal(fwapi.ConditionSeverityInfo))
+	g.Expect(version.Reason).To(Equal(reason))
 }
 
 func eventuallyService(
