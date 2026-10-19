@@ -95,7 +95,10 @@ test-integration-setup: manifests ## Prepare the cluster for integration tests.
 
 .PHONY: test-integration-run
 test-integration-run: ## Run integration tests against the current kubeconfig context's cluster.
-	go test ./test/integration/... -v -timeout 5m -failfast
+	# -count=1 bypasses go's test cache: this suite asserts live cluster state,
+	# so a cached result from a previous run against another cluster would be
+	# a false PASS.
+	go test ./test/integration/... -v -count=1 -timeout 5m -failfast
 
 .PHONY: test-integration
 test-integration: test-integration-setup test-integration-run ## Set up and run integration tests.
