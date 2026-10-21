@@ -65,6 +65,9 @@ type Values struct {
 	// ImagePullSecrets configures pod image pull secrets.
 	ImagePullSecrets []ImagePullSecretRef `json:"imagePullSecrets"`
 
+	// Monitoring configures optional integration with the platform's monitoring stack.
+	Monitoring MonitoringSpec `json:"monitoring"`
+
 	// Platform values are written explicitly into the controller ConfigMap.
 	Platform PlatformSpec `json:"platform"`
 
@@ -122,6 +125,14 @@ type ImagePullSecretRef struct {
 	Name string `json:"name"`
 }
 
+type MonitoringSpec struct {
+	ServiceMonitor ServiceMonitorSpec `json:"serviceMonitor"`
+}
+
+type ServiceMonitorSpec struct {
+	Enabled bool `json:"enabled" jsonschema:"default=true"`
+}
+
 // DefaultValues returns a Values instance with sensible defaults.
 func DefaultValues() Values {
 	return Values{
@@ -144,6 +155,9 @@ func DefaultValues() Values {
 		},
 		ServiceAccount:   ServiceAccountSpec{},
 		ImagePullSecrets: []ImagePullSecretRef{},
+		Monitoring: MonitoringSpec{
+			ServiceMonitor: ServiceMonitorSpec{Enabled: true},
+		},
 		Platform: PlatformSpec{
 			Type:    "OpenDataHub",
 			Version: "",

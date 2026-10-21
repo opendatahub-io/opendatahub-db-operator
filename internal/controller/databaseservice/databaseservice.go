@@ -22,9 +22,14 @@ import (
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/predicates/dependent"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
+	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 )
@@ -72,6 +77,21 @@ func NewReconciler(
 			reconciler.WithDefaultRequeueAfter(retryInterval(cfg)),
 		).
 		WithAction(m.reportStatus).
+		// Provider status changes re-aggregate the service immediately instead
+		// of waiting for the periodic requeue. The watch registers dynamically
+		// (CrdExists) because the DatabaseProvider CRD may not be installed,
+		// and the mapper targets the CEL-enforced singleton by name.
+		Watches(
+			&infraApi.DatabaseProvider{},
+			reconciler.Dynamic(reconciler.CrdExists(infraApi.GroupVersion.WithKind("DatabaseProvider"))),
+			reconciler.WithEventMapper(func(_ context.Context, _ client.Object) []reconcile.Request {
+				return []reconcile.Request{{
+					NamespacedName: client.ObjectKey{Name: servicesv1alpha1.DatabaseServiceInstanceName},
+				}}
+			}),
+			reconciler.WithPredicates(dependent.New(dependent.WithWatchStatus(true))),
+		).
+		WithConditions(conditions.Dependent(fwapi.ConditionType(ConditionProviderHealth), conditions.HealthyWhenTrue)).
 		Build(ctx)
 
 	return err

@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
@@ -93,5 +94,10 @@ func TestDatabaseServiceReconcilesWithoutProviderCRD(t *testing.T) {
 		got := &servicesv1alpha1.DatabaseService{}
 		g.Expect(mgr.GetClient().Get(ctx, client.ObjectKeyFromObject(instance), got)).To(Succeed())
 		g.Expect(got.Status.Phase).To(Equal(reconciler.DefaultPhaseReady))
+
+		version := conditions.FindStatusCondition(got, "ServerVersion")
+		g.Expect(version).NotTo(BeNil())
+		g.Expect(version.Status).To(Equal(metav1.ConditionUnknown))
+		g.Expect(version.Reason).To(Equal("DatabaseProviderCRDMissing"))
 	}, 30*time.Second).Should(Succeed())
 }

@@ -36,6 +36,18 @@
         "pullPolicy"
       ]
     },
+    "MonitoringSpec": {
+      "properties": {
+        "serviceMonitor": {
+          "$ref": "#/$defs/ServiceMonitorSpec"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "serviceMonitor"
+      ]
+    },
     "OperatorSpec": {
       "properties": {
         "image": {
@@ -109,6 +121,19 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ServiceMonitorSpec": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "enabled"
+      ]
+    },
     "Values": {
       "properties": {
         "nameOverride": {
@@ -129,6 +154,9 @@
           },
           "type": "array"
         },
+        "monitoring": {
+          "$ref": "#/$defs/MonitoringSpec"
+        },
         "platform": {
           "$ref": "#/$defs/PlatformSpec"
         },
@@ -145,6 +173,7 @@
         "operator",
         "serviceAccount",
         "imagePullSecrets",
+        "monitoring",
         "platform",
         "config"
       ]

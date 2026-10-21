@@ -109,6 +109,7 @@ func New(
 		Metrics: metricsserver.Options{
 			BindAddress:    cfg.Controller.Metrics.BindAddress,
 			SecureServing:  true,
+			CertDir:        "/tmp/k8s-metrics-server/serving-certs",
 			FilterProvider: filters.WithAuthenticationAndAuthorization,
 		},
 		HealthProbeBindAddress:        cfg.Controller.Health.BindAddress,
