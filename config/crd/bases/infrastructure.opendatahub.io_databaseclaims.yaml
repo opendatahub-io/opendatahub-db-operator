@@ -46,7 +46,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseClaimSpec defines the desired state of DatabaseClaim.
+            description: |-
+              DatabaseClaimSpec defines the desired state of DatabaseClaim.
+
+              Field-level self == oldSelf rules do not run when an optional field is
+              removed or when it is first added; these Spec-level presence rules close
+              both gaps so a field cannot be cleared or introduced after create (same
+              pattern as SchemaClaimSpec).
             properties:
               access:
                 default: ReadWrite
@@ -159,10 +165,10 @@ spec:
             - provider
             type: object
             x-kubernetes-validations:
-            - message: secretName cannot be removed once set
-              rule: '!has(oldSelf.secretName) || has(self.secretName)'
-            - message: database cannot be removed once set
-              rule: '!has(oldSelf.database) || has(self.database)'
+            - message: secretName cannot be added or removed after claim creation
+              rule: has(oldSelf.secretName) == has(self.secretName)
+            - message: database cannot be added or removed after claim creation
+              rule: has(oldSelf.database) == has(self.database)
           status:
             description: |-
               DatabaseClaimStatus defines the observed state of DatabaseClaim. Phase

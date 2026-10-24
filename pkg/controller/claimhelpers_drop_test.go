@@ -43,20 +43,20 @@ func TestShouldDropClaimDatabase_RequiresCreatedAndDelete(t *testing.T) {
 		},
 	}
 
-	g.Expect(controller.ShouldDropClaimDatabase(claim, "postgres", nil)).To(BeTrue())
+	g.Expect(controller.ShouldDropClaimDatabase(claim, "postgres", nil, nil)).To(BeTrue())
 
 	retain := claim.DeepCopy()
 	retain.Spec.DeletionPolicy = infraApi.DeletionPolicyRetain
-	g.Expect(controller.ShouldDropClaimDatabase(retain, "postgres", nil)).To(BeFalse())
+	g.Expect(controller.ShouldDropClaimDatabase(retain, "postgres", nil, nil)).To(BeFalse())
 
 	notCreated := claim.DeepCopy()
 	notCreated.Status.DatabaseCreated = false
-	g.Expect(controller.ShouldDropClaimDatabase(notCreated, "postgres", nil)).To(BeFalse())
+	g.Expect(controller.ShouldDropClaimDatabase(notCreated, "postgres", nil, nil)).To(BeFalse())
 
 	defaultDB := claim.DeepCopy()
 	defaultDB.Spec.Database = "postgres"
 	defaultDB.Status.Database = "postgres"
-	g.Expect(controller.ShouldDropClaimDatabase(defaultDB, "postgres", nil)).To(BeFalse())
+	g.Expect(controller.ShouldDropClaimDatabase(defaultDB, "postgres", nil, nil)).To(BeFalse())
 }
 
 func TestShouldDropClaimDatabase_BlocksWhenShared(t *testing.T) {
@@ -86,5 +86,212 @@ func TestShouldDropClaimDatabase_BlocksWhenShared(t *testing.T) {
 		},
 	}
 
-	g.Expect(controller.ShouldDropClaimDatabase(claim, "postgres", []infraApi.DatabaseClaim{other})).To(BeFalse())
+	g.Expect(controller.ShouldDropClaimDatabase(claim, "postgres", []infraApi.DatabaseClaim{other}, nil)).To(BeFalse())
+}
+
+func TestShouldDropClaimDatabase_BlocksWhenSchemaClaimUsesDatabase(t *testing.T) {
+	g := NewWithT(t)
+	claim := &infraApi.DatabaseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: types.UID("uid-a")},
+		Spec: infraApi.DatabaseClaimSpec{
+			Provider:       infraApi.ProviderRef{Name: "rhai-db"},
+			Database:       "analytics",
+			DeletionPolicy: infraApi.DeletionPolicyDelete,
+		},
+		Status: infraApi.DatabaseClaimStatus{
+			Provider:        "rhai-db",
+			Database:        "analytics",
+			DatabaseCreated: true,
+		},
+	}
+	schemaClaim := infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "sc", Namespace: "app", UID: types.UID("uid-sc")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider: infraApi.ProviderRef{Name: "rhai-db"},
+			Database: "analytics",
+			Schema:   "app_schema",
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider: "rhai-db",
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+
+	g.Expect(controller.ShouldDropClaimDatabase(claim, "postgres", nil, []infraApi.SchemaClaim{schemaClaim})).To(BeFalse())
+}
+
+func TestShouldDropClaimSchema_RequiresCreatedAndDelete(t *testing.T) {
+	g := NewWithT(t)
+	claim := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: types.UID("uid-a")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider:       infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:         "app_schema",
+			Database:       "analytics",
+			DeletionPolicy: infraApi.DeletionPolicyDelete,
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider:      "rhai-db",
+			Schema:        "app_schema",
+			SchemaCreated: true,
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+
+	g.Expect(controller.ShouldDropClaimSchema(claim, "postgres", nil)).To(BeTrue())
+
+	retain := claim.DeepCopy()
+	retain.Spec.DeletionPolicy = infraApi.DeletionPolicyRetain
+	g.Expect(controller.ShouldDropClaimSchema(retain, "postgres", nil)).To(BeFalse())
+
+	notCreated := claim.DeepCopy()
+	notCreated.Status.SchemaCreated = false
+	g.Expect(controller.ShouldDropClaimSchema(notCreated, "postgres", nil)).To(BeFalse())
+}
+
+func TestShouldDropClaimSchema_BlocksReserved(t *testing.T) {
+	g := NewWithT(t)
+	claim := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: types.UID("uid-a")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider:       infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:         "public",
+			Database:       "analytics",
+			DeletionPolicy: infraApi.DeletionPolicyDelete,
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider:      "rhai-db",
+			Schema:        "public",
+			SchemaCreated: true,
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+
+	g.Expect(controller.IsReservedSchema("public")).To(BeTrue())
+	g.Expect(controller.IsReservedSchema("pg_toast")).To(BeTrue())
+	g.Expect(controller.IsReservedSchema("pg_temp_1")).To(BeTrue())
+	g.Expect(controller.IsReservedSchema("app_schema")).To(BeFalse())
+	g.Expect(controller.ShouldDropClaimSchema(claim, "postgres", nil)).To(BeFalse())
+}
+
+func TestShouldDropClaimSchema_BlocksWhenShared(t *testing.T) {
+	g := NewWithT(t)
+	claim := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: types.UID("uid-a")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider:       infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:         "app_schema",
+			Database:       "analytics",
+			DeletionPolicy: infraApi.DeletionPolicyDelete,
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider:      "rhai-db",
+			Schema:        "app_schema",
+			SchemaCreated: true,
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+	other := infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "other-ns", UID: types.UID("uid-b")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider: infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:   "app_schema",
+			Database: "analytics",
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider: "rhai-db",
+			Schema:   "app_schema",
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+
+	g.Expect(controller.ShouldDropClaimSchema(claim, "postgres", []infraApi.SchemaClaim{other})).To(BeFalse())
+}
+
+func TestShouldDropClaimSchema_AllowsWhenSharedPeerIsDeleting(t *testing.T) {
+	g := NewWithT(t)
+	now := metav1.Now()
+	claim := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: types.UID("uid-a")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider:       infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:         "app_schema",
+			Database:       "analytics",
+			DeletionPolicy: infraApi.DeletionPolicyDelete,
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider:      "rhai-db",
+			Schema:        "app_schema",
+			SchemaCreated: true,
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+	other := infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "b",
+			Namespace:         "other-ns",
+			UID:               types.UID("uid-b"),
+			DeletionTimestamp: &now,
+		},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider: infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:   "app_schema",
+			Database: "analytics",
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider: "rhai-db",
+			Schema:   "app_schema",
+			Connection: infraApi.SchemaConnectionStatus{
+				Database: "analytics",
+			},
+		},
+	}
+
+	g.Expect(controller.ShouldDropClaimSchema(claim, "postgres", []infraApi.SchemaClaim{other})).To(BeTrue())
+}
+
+func TestShouldDropClaimSchema_BlocksWhenSharedViaProviderDefault(t *testing.T) {
+	g := NewWithT(t)
+	// Explicit default DB name vs omitted Spec.Database must compare equal after
+	// resolving against the provider default.
+	claim := &infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns", UID: types.UID("uid-a")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider:       infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:         "app_schema",
+			Database:       "postgres",
+			DeletionPolicy: infraApi.DeletionPolicyDelete,
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider:      "rhai-db",
+			Schema:        "app_schema",
+			SchemaCreated: true,
+		},
+	}
+	other := infraApi.SchemaClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "other-ns", UID: types.UID("uid-b")},
+		Spec: infraApi.SchemaClaimSpec{
+			Provider: infraApi.ProviderRef{Name: "rhai-db"},
+			Schema:   "app_schema",
+			// Database omitted: provider default.
+		},
+		Status: infraApi.SchemaClaimStatus{
+			Provider: "rhai-db",
+			Schema:   "app_schema",
+		},
+	}
+
+	g.Expect(controller.ShouldDropClaimSchema(claim, "postgres", []infraApi.SchemaClaim{other})).To(BeFalse())
 }

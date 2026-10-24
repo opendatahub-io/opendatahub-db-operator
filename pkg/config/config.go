@@ -82,6 +82,9 @@ const (
 	// KeyDatabaseClaimRetryInterval is the periodic-retry interval for the
 	// DatabaseClaim reconciler.
 	KeyDatabaseClaimRetryInterval = "databaseclaim.retry-interval"
+	// KeySchemaClaimRetryInterval is the periodic-retry interval for the
+	// SchemaClaim reconciler.
+	KeySchemaClaimRetryInterval = "schemaclaim.retry-interval"
 	// KeyGracePeriod is the config key for GracePeriod (unused by DatabaseClaim
 	// finalizer cleanup, which retries until role cleanup succeeds).
 	KeyGracePeriod = "grace-period"
@@ -145,7 +148,7 @@ var TestedPostgresVersions = postgres.MajorVersionRange{Minimum: 13, Maximum: 17
 //
 // This config covers generic controller settings, Internal provider image
 // defaults, and independent retry intervals for DatabaseService,
-// DatabaseProvider, and DatabaseClaim reconciliation.
+// DatabaseProvider, DatabaseClaim, and SchemaClaim reconciliation.
 type Config struct {
 	OperatorNamespace string          `mapstructure:"operator-namespace"`
 	PlatformType      string          `mapstructure:"platformType"`
@@ -157,6 +160,7 @@ type Config struct {
 	DatabaseProvider RetryConfig      `mapstructure:"databaseprovider"`
 	DatabaseService  RetryConfig      `mapstructure:"databaseservice"`
 	DatabaseClaim    RetryConfig      `mapstructure:"databaseclaim"`
+	SchemaClaim      RetryConfig      `mapstructure:"schemaclaim"`
 	// GracePeriod is reserved for claim kinds that may allow timed finalizer
 	// release. DatabaseClaim cleanup does not use it: the finalizer stays
 	// until role (and optional DB) cleanup succeeds.

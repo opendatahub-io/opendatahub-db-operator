@@ -38,6 +38,7 @@ import (
 	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/databaseclaim"
 	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/databaseprovider"
 	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/databaseservice"
+	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/schemaclaim"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 )
 
@@ -70,9 +71,9 @@ func NewScheme() (*runtime.Scheme, error) {
 }
 
 // New creates the manager and registers reconcilers. DatabaseService always
-// registers; DatabaseProvider and DatabaseClaim register only when their CRDs
-// are present so the operator can still reconcile the module singleton when
-// infrastructure CRDs are not installed yet.
+// registers; DatabaseProvider, DatabaseClaim, and SchemaClaim register only
+// when their CRDs are present so the operator can still reconcile the module
+// singleton when infrastructure CRDs are not installed yet.
 func New(
 	ctx context.Context,
 	kubeConfig *rest.Config,
@@ -146,12 +147,13 @@ func New(
 		log.Info("DatabaseProvider CRD is absent; provider reconciliation requires a restart after CRD installation")
 	}
 
-	// Claim watches DatabaseProvider, so both CRDs must be present.
-	claimCRDAvailable, err := crdAvailable(ctx, reader, infraApi.DatabaseClaimCRDName)
+	// Claims watch DatabaseProvider, so both the claim CRD and provider CRD
+	// must be present for each claim reconciler.
+	databaseClaimCRDAvailable, err := crdAvailable(ctx, reader, infraApi.DatabaseClaimCRDName)
 	if err != nil {
 		return nil, fmt.Errorf("checking DatabaseClaim CRD: %w", err)
 	}
-	if claimCRDAvailable && providerCRDAvailable {
+	if databaseClaimCRDAvailable && providerCRDAvailable {
 		if err := databaseclaim.NewReconciler(ctx, mgr, cfg, databaseclaim.Options{
 			Recorder: mgr.GetEventRecorder(infraApi.DatabaseClaimResource),
 		}); err != nil {
@@ -159,6 +161,20 @@ func New(
 		}
 	} else {
 		log.Info("DatabaseClaim reconciliation skipped; requires claim and provider CRDs (restart after install)")
+	}
+
+	schemaClaimCRDAvailable, err := crdAvailable(ctx, reader, infraApi.SchemaClaimCRDName)
+	if err != nil {
+		return nil, fmt.Errorf("checking SchemaClaim CRD: %w", err)
+	}
+	if schemaClaimCRDAvailable && providerCRDAvailable {
+		if err := schemaclaim.NewReconciler(ctx, mgr, cfg, schemaclaim.Options{
+			Recorder: mgr.GetEventRecorder(infraApi.SchemaClaimResource),
+		}); err != nil {
+			return nil, fmt.Errorf("creating schemaclaim reconciler: %w", err)
+		}
+	} else {
+		log.Info("SchemaClaim reconciliation skipped; requires claim and provider CRDs (restart after install)")
 	}
 
 	if err := mgr.AddHealthzCheck(healthCheckName, healthz.Ping); err != nil {

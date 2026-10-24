@@ -62,6 +62,20 @@ func ApplyClaimCredentials(
 	}
 }
 
+func ApplySchemaClaimCredentials(
+	secret *corev1.Secret,
+	cfg postgres.Config,
+	role string,
+	password string,
+	database string,
+	schema string,
+) {
+	ApplyClaimCredentials(secret, cfg, role, password, database)
+	if schema != "" {
+		secret.Data[postgres.SecretKeySchema] = []byte(schema)
+	}
+}
+
 // ProviderReachable reports whether the provider has Reachable=True.
 func ProviderReachable(conditions []fwapi.Condition) bool {
 	for _, c := range conditions {

@@ -17,10 +17,19 @@ limitations under the License.
 package controller
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 )
+
+// schemaClaimSecretPrefix distinguishes SchemaClaim credential Secrets from
+// DatabaseClaim Secrets that default to the bare claim name in the same
+// namespace.
+const schemaClaimSecretPrefix = "sc-"
+
+// maxSecretNameLen is Kubernetes' metadata.name limit for Secrets.
+const maxSecretNameLen = 253
 
 func SecretNameForSchemaClaim(claim *infraApi.SchemaClaim) string {
 	switch {
@@ -29,8 +38,26 @@ func SecretNameForSchemaClaim(claim *infraApi.SchemaClaim) string {
 	case claim.Spec.SecretName != "":
 		return claim.Spec.SecretName
 	default:
-		return claim.Name
+		return prefixedSecretName(schemaClaimSecretPrefix, claim.Name)
 	}
+}
+
+// prefixedSecretName returns prefix+name when that fits in maxSecretNameLen.
+// Otherwise it truncates the name and appends a short hash of the full name so
+// long claims stay unique and within the Kubernetes name limit.
+func prefixedSecretName(prefix, name string) string {
+	full := prefix + name
+	if len(full) <= maxSecretNameLen {
+		return full
+	}
+	h := fmt.Sprintf("%x", sha256.Sum256([]byte(name)))[:8]
+	// prefix + base + "-" + 8 hex
+	baseMax := maxSecretNameLen - len(prefix) - 1 - len(h)
+	base := name
+	if len(base) > baseMax {
+		base = base[:baseMax]
+	}
+	return prefix + base + "-" + h
 }
 
 func SecretNameForDatabaseClaim(claim *infraApi.DatabaseClaim) string {

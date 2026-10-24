@@ -22,30 +22,73 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
+	"github.com/opendatahub-io/opendatahub-db-operator/pkg/controller/claimerrors"
 	"github.com/opendatahub-io/opendatahub-db-operator/pkg/postgres"
 )
 
 const (
 	// maxRoleNameLen is PostgreSQL's identifier length limit.
 	maxRoleNameLen = 63
+	// maxSchemaLen is PostgreSQL's identifier length limit for schema names.
+	maxSchemaLen = 63
 )
 
 var nonIdentRe = regexp.MustCompile(`[^a-z0-9_]`)
 
-// RoleNameFor derives a deterministic, PostgreSQL-safe role name from a claim's
-// namespace and name. A short hash of the original (unsanitized) identity is
-// always appended so distinct claim names that sanitize to the same string
-// (e.g. my-db vs my.db) cannot collide onto one role.
+// RoleNameFor derives a deterministic, PostgreSQL-safe role name for a
+// DatabaseClaim from namespace and name. A short hash of the unsanitized
+// identity is always appended so distinct claim names that sanitize to the
+// same string (e.g. my-db vs my.db) cannot collide onto one role.
+//
+// SchemaClaim must use RoleNameForSchemaClaim so the two kinds never share a
+// role when namespace and name match.
 func RoleNameFor(namespace, name string) string {
-	raw := fmt.Sprintf("%s_%s", namespace, name)
+	return roleNameFromRaw(fmt.Sprintf("%s_%s", namespace, name))
+}
+
+// RoleNameForSchemaClaim derives a PostgreSQL role name for a SchemaClaim.
+// The "sc_" kind prefix keeps it distinct from RoleNameFor for a DatabaseClaim
+// with the same namespace and name.
+func RoleNameForSchemaClaim(namespace, name string) string {
+	return roleNameFromRaw(fmt.Sprintf("sc_%s_%s", namespace, name))
+}
+
+func roleNameFromRaw(raw string) string {
 	safe := nonIdentRe.ReplaceAllString(raw, "_")
 	h := fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))[:8]
 	baseMax := maxRoleNameLen - 9 // "_" + 8 hex
+	if len(safe) > baseMax {
+		safe = safe[:baseMax]
+	}
+	return safe + "_" + h
+}
+
+// SchemaNameFor returns the effective schema for a SchemaClaim: spec.schema
+// when set (CEL already enforces pattern/length), otherwise a default derived
+// from namespace and name. A short hash of the unsanitized identity is always
+// appended so distinct claims that sanitize to the same string (e.g. a-b/c vs
+// a/b-c) cannot collide onto one schema.
+func SchemaNameFor(claim *infraApi.SchemaClaim) string {
+	if claim == nil {
+		return ""
+	}
+	if claim.Spec.Schema != "" {
+		return claim.Spec.Schema
+	}
+
+	raw := strings.ToLower(claim.Namespace + "_" + claim.Name)
+	safe := nonIdentRe.ReplaceAllString(raw, "_")
+	h := fmt.Sprintf("%x", sha256.Sum256([]byte(raw)))[:8]
+	baseMax := maxSchemaLen - 9 // "_" + 8 hex
 	if len(safe) > baseMax {
 		safe = safe[:baseMax]
 	}
@@ -169,11 +212,16 @@ func ClearRoleOwnershipInDatabase(
 
 // ShouldDropClaimDatabase reports whether cleanup may DROP the claim database.
 // Requires DeletionPolicy=Delete, status.databaseCreated, a named non-default
-// database, and no other DatabaseClaim still referencing it on the same provider.
+// database, no other DatabaseClaim still referencing it on the same provider,
+// and no live SchemaClaim still targeting that database (SchemaClaims nest
+// schemas inside it; dropping would destroy their data while they remain active).
+// SchemaClaims with DeletionTimestamp set are ignored so concurrent deletes do
+// not block each other.
 func ShouldDropClaimDatabase(
 	claim *infraApi.DatabaseClaim,
 	providerDefaultDB string,
 	others []infraApi.DatabaseClaim,
+	schemaClaims []infraApi.SchemaClaim,
 ) bool {
 	if claim == nil {
 		return false
@@ -221,6 +269,22 @@ func ShouldDropClaimDatabase(
 			return false
 		}
 	}
+	for i := range schemaClaims {
+		sc := &schemaClaims[i]
+		if !sc.DeletionTimestamp.IsZero() {
+			continue
+		}
+		scProvider := sc.Status.Provider
+		if scProvider == "" {
+			scProvider = sc.Spec.Provider.Name
+		}
+		if scProvider != provider {
+			continue
+		}
+		if schemaClaimDatabase(sc, providerDefaultDB) == database {
+			return false
+		}
+	}
 	return true
 }
 
@@ -231,4 +295,111 @@ func ListDatabaseClaims(ctx context.Context, cli client.Client) ([]infraApi.Data
 		return nil, err
 	}
 	return list.Items, nil
+}
+
+// IsReservedSchema reports PostgreSQL system / default schemas that a claim
+// must never DROP SCHEMA CASCADE, even if Status.SchemaCreated is somehow set.
+func IsReservedSchema(schema string) bool {
+	switch strings.ToLower(schema) {
+	case "public", "pg_catalog", "information_schema", "pg_toast":
+		return true
+	default:
+		return strings.HasPrefix(strings.ToLower(schema), "pg_")
+	}
+}
+
+// ShouldDropClaimSchema reports whether cleanup may DROP SCHEMA CASCADE.
+// Requires DeletionPolicy=Delete, status.schemaCreated, a non-reserved schema,
+// and no other live SchemaClaim still referencing the same schema on the same
+// provider database. Peers with DeletionTimestamp set are ignored so concurrent
+// deletes of shared-schema claims do not block each other. providerDefaultDB is
+// applied when a claim omits spec.database, matching ResolveDatabase /
+// cleanupAction.
+func ShouldDropClaimSchema(
+	claim *infraApi.SchemaClaim,
+	providerDefaultDB string,
+	others []infraApi.SchemaClaim,
+) bool {
+	if claim == nil {
+		return false
+	}
+	if claim.Spec.DeletionPolicy != infraApi.DeletionPolicyDelete {
+		return false
+	}
+	if !claim.Status.SchemaCreated {
+		return false
+	}
+	schema := claim.Status.Schema
+	if schema == "" {
+		schema = SchemaNameFor(claim)
+	}
+	if schema == "" || IsReservedSchema(schema) {
+		return false
+	}
+	database := schemaClaimDatabase(claim, providerDefaultDB)
+	provider := claim.Status.Provider
+	if provider == "" {
+		provider = claim.Spec.Provider.Name
+	}
+	for i := range others {
+		other := &others[i]
+		if other.UID == claim.UID {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		otherProvider := other.Status.Provider
+		if otherProvider == "" {
+			otherProvider = other.Spec.Provider.Name
+		}
+		if otherProvider != provider {
+			continue
+		}
+		otherSchema := other.Status.Schema
+		if otherSchema == "" {
+			otherSchema = SchemaNameFor(other)
+		}
+		if otherSchema != schema {
+			continue
+		}
+		if schemaClaimDatabase(other, providerDefaultDB) == database {
+			return false
+		}
+	}
+	return true
+}
+
+// schemaClaimDatabase returns the effective database for share/drop checks:
+// status.connection.database when set, otherwise Spec.Database resolved
+// against the provider default (empty Spec means the default).
+func schemaClaimDatabase(claim *infraApi.SchemaClaim, providerDefaultDB string) string {
+	if claim.Status.Connection.Database != "" {
+		return claim.Status.Connection.Database
+	}
+	return ResolveDatabase(claim.Spec.Database, postgres.Config{DBName: providerDefaultDB})
+}
+
+// ListSchemaClaims returns all SchemaClaims visible to cli.
+func ListSchemaClaims(ctx context.Context, cli client.Client) ([]infraApi.SchemaClaim, error) {
+	list := &infraApi.SchemaClaimList{}
+	if err := cli.List(ctx, list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// RejectForeignCredentialsSecret returns SecretNotOwned when secret already
+// exists and is not controller-owned by claimUID. A missing Secret is fine.
+// SchemaClaim "foo" and DatabaseClaim "sc-foo" both default to Secret "sc-foo";
+// rejecting early avoids Postgres role/password work on another claim's Secret.
+func RejectForeignCredentialsSecret(secret *corev1.Secret, claimUID types.UID) error {
+	if secret == nil || secret.ResourceVersion == "" {
+		return nil
+	}
+	owner := metav1.GetControllerOf(secret)
+	if owner != nil && owner.UID == claimUID {
+		return nil
+	}
+	return claimerrors.SecretNotOwned{Secret: secret.Name}
 }

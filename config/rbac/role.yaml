@@ -79,9 +79,8 @@ rules:
   - infrastructure.opendatahub.io
   resources:
   - databaseclaims
+  - schemaclaims
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -92,6 +91,7 @@ rules:
   resources:
   - databaseclaims/finalizers
   - databaseproviders/finalizers
+  - schemaclaims/finalizers
   verbs:
   - update
 - apiGroups:
@@ -99,6 +99,7 @@ rules:
   resources:
   - databaseclaims/status
   - databaseproviders/status
+  - schemaclaims/status
   verbs:
   - get
   - patch
@@ -107,7 +108,6 @@ rules:
   - infrastructure.opendatahub.io
   resources:
   - databaseproviders
-  - schemaclaims
   verbs:
   - get
   - list

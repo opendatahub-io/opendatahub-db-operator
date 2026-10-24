@@ -46,7 +46,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: SchemaClaimSpec defines the desired state of SchemaClaim.
+            description: |-
+              SchemaClaimSpec defines the desired state of SchemaClaim.
+
+              Field-level self == oldSelf rules do not run when an optional field is
+              removed or when it is first added; these Spec-level presence rules close
+              both gaps so a field cannot be cleared or introduced after create (same
+              pattern as DatabaseClaimSpec / DatabaseProvider optional fields).
             properties:
               access:
                 default: ReadWrite
@@ -142,11 +148,11 @@ spec:
               schema:
                 description: |-
                   Schema is an optional override for the schema name. If omitted, it
-                  defaults to "${namespace}_${name}", sanitized to a valid PostgreSQL
-                  identifier (task-06). Immutable once set: changing it mid-life implies
-                  a different claim, not an update to this one -- if this proves too
-                  strict for a legitimate day-2 use case, revisit rather than silently
-                  dropping the rule.
+                  defaults to a sanitized "${namespace}_${name}" plus a short hash of the
+                  unsanitized identity so distinct claims cannot collide. Immutable once
+                  set: changing it mid-life implies a different claim, not an update to
+                  this one -- if this proves too strict for a legitimate day-2 use case,
+                  revisit rather than silently dropping the rule.
                 maxLength: 63
                 pattern: ^[a-z][a-z0-9_]*$
                 type: string
@@ -156,8 +162,10 @@ spec:
               secretName:
                 description: |-
                   SecretName overrides the name of the credentials Secret projected in the
-                  claim namespace. If omitted, the claim name is used. Immutable once set so
-                  updates never strand credentials under an old Secret name.
+                  claim namespace. If omitted, the default is "sc-" plus the claim name so a
+                  SchemaClaim cannot collide with a DatabaseClaim of the same name.
+                  Immutable once set so updates never strand credentials under an old
+                  Secret name.
                 maxLength: 253
                 pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
                 type: string
@@ -167,6 +175,13 @@ spec:
             required:
             - provider
             type: object
+            x-kubernetes-validations:
+            - message: secretName cannot be added or removed after claim creation
+              rule: has(oldSelf.secretName) == has(self.secretName)
+            - message: schema cannot be added or removed after claim creation
+              rule: has(oldSelf.schema) == has(self.schema)
+            - message: database cannot be added or removed after claim creation
+              rule: has(oldSelf.database) == has(self.database)
           status:
             description: |-
               SchemaClaimStatus defines the observed state of SchemaClaim. Phase (human-
@@ -247,8 +262,9 @@ spec:
                   secretRef:
                     description: |-
                       SecretRef names the credentials Secret in the claim's own namespace.
-                      When spec.secretName is set, it matches that value; otherwise it falls
-                      back to the claim's own metadata.name.
+                      When spec.secretName is set, it matches that value; otherwise it is the
+                      claim-kind default (bare claim name for DatabaseClaim, "sc-"+name for
+                      SchemaClaim).
                     properties:
                       name:
                         default: ""
@@ -310,8 +326,14 @@ spec:
               schema:
                 description: |-
                   Schema is the actual resolved schema name -- always populated, whether
-                  from spec.schema or the "${namespace}_${name}" default.
+                  from spec.schema or the collision-resistant namespace/name default.
                 type: string
+              schemaCreated:
+                description: |-
+                  SchemaCreated is true when this claim created the named schema during
+                  provisioning. DeletionPolicy=Delete may drop the schema only when this
+                  is true (and no other SchemaClaim still references it).
+                type: boolean
             type: object
         type: object
     served: true

@@ -248,7 +248,11 @@ func (m *Controller) cleanupAction(ctx context.Context, rr *odhtypes.Reconciliat
 	if err != nil {
 		return fmt.Errorf("listing DatabaseClaims before database drop: %w", err)
 	}
-	if dbcontroller.ShouldDropClaimDatabase(obj, providerCfg.DBName, others) {
+	schemaClaims, err := dbcontroller.ListSchemaClaims(ctx, rr.Client)
+	if err != nil {
+		return fmt.Errorf("listing SchemaClaims before database drop: %w", err)
+	}
+	if dbcontroller.ShouldDropClaimDatabase(obj, providerCfg.DBName, others, schemaClaims) {
 		if err := postgres.DropDatabase(ctx, pgClient, database); err != nil {
 			return fmt.Errorf("dropping database %q: %w", database, err)
 		}

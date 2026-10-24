@@ -53,8 +53,13 @@ type DatabaseConnectionStatus struct {
 
 // DatabaseClaimSpec defines the desired state of DatabaseClaim.
 //
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.secretName) || has(self.secretName)",message="secretName cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.database) || has(self.database)",message="database cannot be removed once set"
+// Field-level self == oldSelf rules do not run when an optional field is
+// removed or when it is first added; these Spec-level presence rules close
+// both gaps so a field cannot be cleared or introduced after create (same
+// pattern as SchemaClaimSpec).
+//
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.secretName) == has(self.secretName)",message="secretName cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.database) == has(self.database)",message="database cannot be added or removed after claim creation"
 type DatabaseClaimSpec struct {
 	// Provider selects the DatabaseProvider to provision against.
 	// +kubebuilder:validation:Required

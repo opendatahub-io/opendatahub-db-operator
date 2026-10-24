@@ -18,7 +18,9 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 )
@@ -29,6 +31,7 @@ import (
 // every %s argument must come from QuoteIdentifier or QuoteLiteral.
 const (
 	sqlCreateSchemaIfNotExists = "CREATE SCHEMA IF NOT EXISTS %s"
+	sqlCreateSchema            = "CREATE SCHEMA %s"
 	sqlCreateDatabase          = "CREATE DATABASE %s"
 	sqlDropDatabase            = "DROP DATABASE IF EXISTS %s"
 	sqlDropDatabaseForce       = "DROP DATABASE IF EXISTS %s WITH (FORCE)"
@@ -53,15 +56,32 @@ const (
 	sqlDefaultPrivGrantDML    = "" +
 		"ALTER DEFAULT PRIVILEGES IN SCHEMA %s " +
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s"
+	// ReadOnly gets SELECT only: USAGE would allow nextval and advance the
+	// counter, which is a write.
+	sqlGrantSelectOnSequences            = "GRANT SELECT ON ALL SEQUENCES IN SCHEMA %s TO %s"
+	sqlDefaultPrivGrantSelectOnSequences = "" +
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA %s GRANT SELECT ON SEQUENCES TO %s"
+	sqlGrantDMLOnSequences            = "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %s TO %s"
+	sqlDefaultPrivGrantDMLOnSequences = "" +
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA %s " +
+		"GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %s"
 
 	sqlGrantConnectOnDatabase = "GRANT CONNECT ON DATABASE %s TO %s"
 	sqlGrantCreateOnDatabase  = "GRANT CREATE ON DATABASE %s TO %s"
 
 	sqlCreateExtensionIfNotExists = "CREATE EXTENSION IF NOT EXISTS %s"
 
-	sqlDatabaseExists  = "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)"
-	sqlSchemaExists    = "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = $1)"
+	sqlDatabaseExists     = "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)"
+	sqlSchemaExists       = "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = $1)"
+	sqlSchemaOwnerComment = "" +
+		"SELECT obj_description(n.oid, 'pg_namespace') " +
+		"FROM pg_namespace n WHERE n.nspname = $1"
 	sqlSetRolePassword = `ALTER ROLE %s WITH PASSWORD %s`
+
+	// schemaOwnerMarkerPrefix ties a schema to the SchemaClaim UID that created
+	// it. Written in the same statement as CREATE SCHEMA so recovery can prove
+	// ownership without trusting Kubernetes peer status alone.
+	schemaOwnerMarkerPrefix = "opendatahub.io/schemaclaim-uid="
 )
 
 // sqlEnsureRole is a PL/pgSQL DO block that creates a role only when it does
@@ -79,6 +99,52 @@ $$`
 func CreateSchema(ctx context.Context, cli Client, schema string) error {
 	_, err := cli.Exec(ctx, fmt.Sprintf(sqlCreateSchemaIfNotExists, QuoteIdentifier(schema)))
 	return err
+}
+
+// CreateSchemaExclusive creates a schema and returns a duplicate-schema error
+// if it already exists, so callers can detect a lost create race.
+func CreateSchemaExclusive(ctx context.Context, cli Client, schema string) error {
+	_, err := cli.Exec(ctx, fmt.Sprintf(sqlCreateSchema, QuoteIdentifier(schema)))
+	return err
+}
+
+func schemaOwnerMarker(claimUID string) string {
+	return schemaOwnerMarkerPrefix + claimUID
+}
+
+// CreateSchemaExclusiveWithOwner creates a schema and records claimUID as its
+// ownership marker in one Exec (implicit transaction on one pooled connection).
+// Returns a duplicate-schema error if the schema already exists.
+func CreateSchemaExclusiveWithOwner(ctx context.Context, cli Client, schema, claimUID string) error {
+	if claimUID == "" {
+		return fmt.Errorf("claim UID is required to mark schema ownership")
+	}
+	// %%I / %%L survive fmt.Sprintf and become %I / %L for format().
+	stmt := fmt.Sprintf(`DO $odh$
+BEGIN
+  EXECUTE format('CREATE SCHEMA %%I', %s);
+  EXECUTE format('COMMENT ON SCHEMA %%I IS %%L', %s, %s);
+END
+$odh$`, QuoteLiteral(schema), QuoteLiteral(schema), QuoteLiteral(schemaOwnerMarker(claimUID)))
+	_, err := cli.Exec(ctx, stmt)
+	return err
+}
+
+// SchemaOwnerClaimUID returns the SchemaClaim UID stored on schema, or "" when
+// the schema has no operator ownership marker.
+func SchemaOwnerClaimUID(ctx context.Context, cli Client, schema string) (string, error) {
+	row, err := cli.QueryRow(ctx, sqlSchemaOwnerComment, schema)
+	if err != nil {
+		return "", err
+	}
+	var comment sql.NullString
+	if err := row.Scan(&comment); err != nil {
+		return "", err
+	}
+	if !comment.Valid || !strings.HasPrefix(comment.String, schemaOwnerMarkerPrefix) {
+		return "", nil
+	}
+	return strings.TrimPrefix(comment.String, schemaOwnerMarkerPrefix), nil
 }
 
 // CreateDatabase creates a database if it doesn't already exist. Idempotent.
@@ -213,8 +279,10 @@ func ClearRoleOwnedObjects(ctx context.Context, cli Client, role, newOwner strin
 
 // GrantSchemaPrivileges grants privileges to a role on a schema according to
 // the claim access mode. ReadWrite grants schema-local administration: USAGE,
-// CREATE, and DML on tables. ReadOnly grants USAGE and SELECT only. It also
-// sets default privileges so future admin-created tables are covered.
+// CREATE, and DML on tables and sequences. ReadOnly grants schema USAGE, table
+// SELECT, and sequence SELECT only (no sequence USAGE, so nextval is denied).
+// It also sets default privileges so future admin-created objects are covered
+// (including serial/identity sequences).
 func GrantSchemaPrivileges(
 	ctx context.Context,
 	cli Client,
@@ -228,23 +296,33 @@ func GrantSchemaPrivileges(
 		return fmt.Errorf("grant usage on schema: %w", err)
 	}
 
-	var tableGrant, defaultPriv string
+	var tableGrant, defaultPriv, seqGrant, defaultSeqPriv string
 	if accessMode == infraApi.AccessModeReadOnly {
 		tableGrant = sqlGrantSelectOnTables
 		defaultPriv = sqlDefaultPrivGrantSelect
+		seqGrant = sqlGrantSelectOnSequences
+		defaultSeqPriv = sqlDefaultPrivGrantSelectOnSequences
 	} else {
 		if _, err := cli.Exec(ctx, fmt.Sprintf(sqlGrantCreateOnSchema, q(schema), q(role))); err != nil {
 			return fmt.Errorf("grant create on schema: %w", err)
 		}
 		tableGrant = sqlGrantDMLOnTables
 		defaultPriv = sqlDefaultPrivGrantDML
+		seqGrant = sqlGrantDMLOnSequences
+		defaultSeqPriv = sqlDefaultPrivGrantDMLOnSequences
 	}
 
 	if _, err := cli.Exec(ctx, fmt.Sprintf(tableGrant, q(schema), q(role))); err != nil {
 		return fmt.Errorf("grant on tables: %w", err)
 	}
 	if _, err := cli.Exec(ctx, fmt.Sprintf(defaultPriv, q(schema), q(role))); err != nil {
-		return fmt.Errorf("alter default privileges: %w", err)
+		return fmt.Errorf("alter default privileges on tables: %w", err)
+	}
+	if _, err := cli.Exec(ctx, fmt.Sprintf(seqGrant, q(schema), q(role))); err != nil {
+		return fmt.Errorf("grant on sequences: %w", err)
+	}
+	if _, err := cli.Exec(ctx, fmt.Sprintf(defaultSeqPriv, q(schema), q(role))); err != nil {
+		return fmt.Errorf("alter default privileges on sequences: %w", err)
 	}
 	return nil
 }
@@ -291,12 +369,26 @@ func RevokeDatabasePrivileges(ctx context.Context, cli Client, database, role st
 }
 
 // RevokeSchemaPrivileges revokes the privileges granted by GrantSchemaPrivileges.
-// All three revocations are attempted in order; errors are joined and returned
-// so the caller is aware of partial failures, but revocation continues even if
-// one step fails (the role or schema may already be gone during deletion).
+// Each revocation is attempted in order; errors are joined and returned so the
+// caller is aware of partial failures, but revocation continues even if one
+// step fails (the role or schema may already be gone during deletion).
 func RevokeSchemaPrivileges(ctx context.Context, cli Client, schema, role string) error {
 	q := QuoteIdentifier
 	var errs []error
+
+	if _, err := cli.Exec(
+		ctx,
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA "+q(schema)+" REVOKE ALL ON SEQUENCES FROM "+q(role),
+	); err != nil && !IsUndefinedObject(err) {
+		errs = append(errs, err)
+	}
+
+	if _, err := cli.Exec(
+		ctx,
+		"REVOKE ALL ON ALL SEQUENCES IN SCHEMA "+q(schema)+" FROM "+q(role),
+	); err != nil && !IsUndefinedObject(err) {
+		errs = append(errs, err)
+	}
 
 	if _, err := cli.Exec(
 		ctx,
@@ -308,8 +400,7 @@ func RevokeSchemaPrivileges(ctx context.Context, cli Client, schema, role string
 	if _, err := cli.Exec(
 		ctx,
 		"REVOKE ALL ON ALL TABLES IN SCHEMA "+q(schema)+" FROM "+q(role),
-	); err != nil &&
-		!IsUndefinedObject(err) {
+	); err != nil && !IsUndefinedObject(err) {
 		errs = append(errs, err)
 	}
 

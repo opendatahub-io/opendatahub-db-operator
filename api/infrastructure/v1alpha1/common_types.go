@@ -88,8 +88,9 @@ type ProviderRef struct {
 // it sets Provisioned: True, never partially.
 type ConnectionStatus struct {
 	// SecretRef names the credentials Secret in the claim's own namespace.
-	// When spec.secretName is set, it matches that value; otherwise it falls
-	// back to the claim's own metadata.name.
+	// When spec.secretName is set, it matches that value; otherwise it is the
+	// claim-kind default (bare claim name for DatabaseClaim, "sc-"+name for
+	// SchemaClaim).
 	// +kubebuilder:validation:Required
 	SecretRef corev1.LocalObjectReference `json:"secretRef"`
 
