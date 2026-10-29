@@ -109,7 +109,8 @@ test-integration-run: ## Run integration tests against the current kubeconfig co
 test-integration: test-integration-setup test-integration-run ## Set up and run integration tests.
 
 .PHONY: test-e2e-setup
-test-e2e-setup: test-e2e-context-check test-e2e-cert-manager ## Install cert-manager if absent, build/load the manager image, and install the Helm chart into Kind.
+test-e2e-setup: test-e2e-context-check ## Install cert-manager when needed, build/load the manager image, and install the Helm chart into Kind.
+	@if [ "$(E2E_CERT_MANAGER_PROFILE)" != absent ]; then $(MAKE) test-e2e-cert-manager; fi
 	$(KUBECTL) get --raw=/readyz >/dev/null
 	$(MAKE) test-e2e-teardown
 	# Helm does not update CRDs; include module operand CRDs the standalone chart does not package.
