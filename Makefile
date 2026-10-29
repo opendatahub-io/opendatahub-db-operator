@@ -299,8 +299,8 @@ E2E_NAMESPACE ?= opendatahub-db-operator-e2e
 E2E_RELEASE   ?= opendatahub-db-operator-e2e
 # Installed by test-e2e-cert-manager when absent: the chart's webhook serving
 # certificate and internal-provider TLS both require cert-manager on the cluster.
-CERT_MANAGER_VERSION ?= v1.17.2
-override CERT_MANAGER_SHA256 := dab2794176629d8042ce97b885f378dfe4ef7b5bed5859e9f06616ead9980f4b
+override CERT_MANAGER_VERSION := v1.20.4
+override CERT_MANAGER_SHA256 := c5ad170bd564b37d4bd11fd2c52013e64c2a8266417eb71efc318510a69455e6
 E2E_CERT_MANAGER_PROFILE ?=
 E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE ?=
 E2E_EXTERNAL_ADMIN_SECRET_NAME ?=
