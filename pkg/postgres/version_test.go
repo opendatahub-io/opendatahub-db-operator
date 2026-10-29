@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+// Temporary early-gate infrastructure smoke test only; do not merge.
 func TestParseServerVersionNum(t *testing.T) {
 	tests := []struct {
 		name       string
