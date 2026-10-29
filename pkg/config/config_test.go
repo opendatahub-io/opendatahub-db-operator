@@ -37,6 +37,21 @@ func TestLoad_Defaults(t *testing.T) {
 	g.Expect(cfg.PlatformVersion.String()).To(Equal("0.0.0"))
 	g.Expect(cfg.OperatorNamespace).To(Equal(config.DefaultOperatorNS))
 	g.Expect(cfg.PostgresImage).To(Equal(config.DefaultInternalPostgresImage))
+	g.Expect(cfg.DefaultProviderName).To(Equal(config.DefaultProviderName))
+}
+
+func TestLoad_DefaultProviderName(t *testing.T) {
+	g := NewWithT(t)
+	cfg, err := config.Load(config.WithFS(fstest.MapFS{
+		config.KeyDefaultProviderName: {Data: []byte("team-db")},
+	}))
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(cfg.DefaultProviderName).To(Equal("team-db"))
+
+	_, err = config.Load(config.WithFS(fstest.MapFS{
+		config.KeyDefaultProviderName: {Data: []byte("invalid.name")},
+	}))
+	g.Expect(err).To(HaveOccurred())
 }
 
 func TestLoad_PostgresImage(t *testing.T) {
@@ -202,6 +217,42 @@ func TestLoad_DatabaseProviderRetryDefault(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 
 	g.Expect(cfg.DatabaseProvider.RetryInterval).To(Equal(config.DefaultRetryInterval))
+}
+
+// SchemaClaim's retry-interval must stay independently config-driven like
+// DatabaseService, so the three-layer precedence is exercised explicitly.
+
+func TestLoad_SchemaClaimRetryDefault(t *testing.T) {
+	g := NewWithT(t)
+
+	cfg, err := config.Load()
+	g.Expect(err).NotTo(HaveOccurred())
+
+	g.Expect(cfg.SchemaClaim.RetryInterval).To(Equal(config.DefaultRetryInterval))
+}
+
+func TestLoad_SchemaClaimRetry_ConfigMapOverride(t *testing.T) {
+	g := NewWithT(t)
+
+	cfg, err := config.Load(config.WithFS(fstest.MapFS{
+		config.KeySchemaClaimRetryInterval: {Data: []byte("7m")},
+	}))
+	g.Expect(err).NotTo(HaveOccurred())
+
+	g.Expect(cfg.SchemaClaim.RetryInterval).To(Equal(7 * time.Minute))
+}
+
+func TestLoad_SchemaClaimRetry_EnvOverridesConfigMap(t *testing.T) {
+	g := NewWithT(t)
+
+	t.Setenv("ODH_MODULE_OPERATOR_SCHEMACLAIM_RETRY_INTERVAL", "90s")
+
+	cfg, err := config.Load(config.WithFS(fstest.MapFS{
+		config.KeySchemaClaimRetryInterval: {Data: []byte("3m")},
+	}))
+	g.Expect(err).NotTo(HaveOccurred())
+
+	g.Expect(cfg.SchemaClaim.RetryInterval).To(Equal(90 * time.Second))
 }
 
 func TestLoad_UsesExplicitConfigPathFromStructOption(t *testing.T) {

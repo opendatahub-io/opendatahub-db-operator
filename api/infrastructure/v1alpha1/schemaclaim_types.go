@@ -51,15 +51,29 @@ type SchemaConnectionStatus struct {
 }
 
 // SchemaClaimSpec defines the desired state of SchemaClaim.
+//
+// Field-level self == oldSelf rules do not run when an optional field is
+// removed or when it is first added; these Spec-level presence rules close
+// both gaps so a field cannot be cleared or introduced after create (same
+// pattern as DatabaseClaimSpec / DatabaseProvider optional fields).
+//
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.secretName) == has(self.secretName)",message="secretName cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.schema) == has(self.schema)",message="schema cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.database) == has(self.database)",message="database cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.extensions) == has(self.extensions)",message="extensions cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.provider) || (!has(oldSelf.provider.name) && !has(oldSelf.provider.selector))) == (!has(self.provider) || (!has(self.provider.name) && !has(self.provider.selector)))",message="provider selection cannot be added or removed after claim creation"
 type SchemaClaimSpec struct {
-	// Provider selects the DatabaseProvider to provision against.
-	// +kubebuilder:validation:Required
+	// Provider selects the DatabaseProvider to provision against. Omission
+	// selects the DatabaseService default provider.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="provider is immutable once set"
-	Provider ProviderRef `json:"provider"`
+	Provider ProviderRef `json:"provider,omitempty"`
 
 	// SecretName overrides the name of the credentials Secret projected in the
-	// claim namespace. If omitted, the claim name is used. Immutable once set so
-	// updates never strand credentials under an old Secret name.
+	// claim namespace. If omitted, the default is "sc-" plus the claim name so a
+	// SchemaClaim cannot collide with a DatabaseClaim of the same name.
+	// Immutable once set so updates never strand credentials under an old
+	// Secret name.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
@@ -68,11 +82,11 @@ type SchemaClaimSpec struct {
 	SecretName string `json:"secretName,omitempty"`
 
 	// Schema is an optional override for the schema name. If omitted, it
-	// defaults to "${namespace}_${name}", sanitized to a valid PostgreSQL
-	// identifier (task-06). Immutable once set: changing it mid-life implies
-	// a different claim, not an update to this one -- if this proves too
-	// strict for a legitimate day-2 use case, revisit rather than silently
-	// dropping the rule.
+	// defaults to a sanitized "${namespace}_${name}" plus a short hash of the
+	// unsanitized identity so distinct claims cannot collide. Immutable once
+	// set: changing it mid-life implies a different claim, not an update to
+	// this one -- if this proves too strict for a legitimate day-2 use case,
+	// revisit rather than silently dropping the rule.
 	//
 	// +optional
 	// +kubebuilder:validation:MaxLength=63
@@ -94,6 +108,16 @@ type SchemaClaimSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="access is immutable once set"
 	Access AccessMode `json:"access,omitempty"`
 
+	// Extensions lists PostgreSQL extensions this claim requires in its target
+	// database. Day-one allow-list is vector only. Immutable once set.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Enum=vector
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="extensions are immutable once set"
+	Extensions []string `json:"extensions,omitempty"`
+
 	// DeletionPolicy governs schema+data lifecycle on claim deletion.
 	// +kubebuilder:validation:Enum=Retain;Delete
 	// +kubebuilder:default=Retain
@@ -109,8 +133,14 @@ type SchemaClaimStatus struct {
 	common.ComponentReleaseStatus `json:",inline"`
 
 	// Schema is the actual resolved schema name -- always populated, whether
-	// from spec.schema or the "${namespace}_${name}" default.
+	// from spec.schema or the collision-resistant namespace/name default.
 	Schema string `json:"schema,omitempty"`
+
+	// SchemaCreated is true when this claim created the named schema during
+	// provisioning. DeletionPolicy=Delete may drop the schema only when this
+	// is true (and no other SchemaClaim still references it).
+	// +optional
+	SchemaCreated bool `json:"schemaCreated,omitempty"`
 
 	// Connection is the resolved connection surface once Provisioned,
 	// including the effective credentials Secret name.

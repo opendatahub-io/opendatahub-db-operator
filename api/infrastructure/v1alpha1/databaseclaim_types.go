@@ -53,13 +53,21 @@ type DatabaseConnectionStatus struct {
 
 // DatabaseClaimSpec defines the desired state of DatabaseClaim.
 //
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.secretName) || has(self.secretName)",message="secretName cannot be removed once set"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.database) || has(self.database)",message="database cannot be removed once set"
+// Field-level self == oldSelf rules do not run when an optional field is
+// removed or when it is first added; these Spec-level presence rules close
+// both gaps so a field cannot be cleared or introduced after create (same
+// pattern as SchemaClaimSpec).
+//
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.secretName) == has(self.secretName)",message="secretName cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.database) == has(self.database)",message="database cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.extensions) == has(self.extensions)",message="extensions cannot be added or removed after claim creation"
+// +kubebuilder:validation:XValidation:rule="(!has(oldSelf.provider) || (!has(oldSelf.provider.name) && !has(oldSelf.provider.selector))) == (!has(self.provider) || (!has(self.provider.name) && !has(self.provider.selector)))",message="provider selection cannot be added or removed after claim creation"
 type DatabaseClaimSpec struct {
-	// Provider selects the DatabaseProvider to provision against.
-	// +kubebuilder:validation:Required
+	// Provider selects the DatabaseProvider to provision against. Omission
+	// selects the DatabaseService default provider.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="provider is immutable once set"
-	Provider ProviderRef `json:"provider"`
+	Provider ProviderRef `json:"provider,omitempty"`
 
 	// SecretName overrides the name of the credentials Secret projected in the
 	// claim namespace. If omitted, the claim name is used. Immutable once set so
@@ -87,6 +95,16 @@ type DatabaseClaimSpec struct {
 	// +kubebuilder:default=ReadWrite
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="access is immutable once set"
 	Access AccessMode `json:"access,omitempty"`
+
+	// Extensions lists PostgreSQL extensions this claim requires in its target
+	// database. Day-one allow-list is vector only. Immutable once set.
+	//
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Enum=vector
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="extensions are immutable once set"
+	Extensions []string `json:"extensions,omitempty"`
 
 	// DeletionPolicy governs database lifecycle on claim deletion. Retain
 	// (default) drops only the claim role; Delete may drop a named database

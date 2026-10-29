@@ -34,6 +34,12 @@ func IsDuplicateDatabase(err error) bool {
 	return IsPgError(err, pgerrcode.DuplicateDatabase)
 }
 
+// IsDuplicateSchema reports whether err is SQLSTATE 42P06
+// (duplicate_schema). Concurrent CREATE SCHEMA races land here.
+func IsDuplicateSchema(err error) bool {
+	return IsPgError(err, pgerrcode.DuplicateSchema)
+}
+
 // IsDuplicateObject reports whether err is SQLSTATE 42710 (duplicate_object).
 // Concurrent CREATE ROLE races land here.
 func IsDuplicateObject(err error) bool {

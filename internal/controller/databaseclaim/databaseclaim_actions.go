@@ -22,7 +22,12 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	api "github.com/opendatahub-io/odh-platform-utilities/framework/api"
 	odherrors "github.com/opendatahub-io/odh-platform-utilities/framework/controller/actions/errors"
@@ -44,7 +49,7 @@ func (m *Controller) provisionAction(ctx context.Context, rr *odhtypes.Reconcili
 		return fmt.Errorf("instance is not a DatabaseClaim")
 	}
 
-	provider, err := dbcontroller.ResolveForCurrent(ctx, rr.Client, obj.Spec.Provider, obj.Status.Provider)
+	provider, err := dbcontroller.ResolveForCurrentOrDefault(ctx, rr.Client, obj.Spec.Provider, obj.Status.Provider)
 	if err != nil {
 		if notFound, ok := errors.AsType[dbcontroller.ErrNotFound](err); ok {
 			rr.Conditions.Mark(ConditionProvisioned, metav1.ConditionFalse,
@@ -113,6 +118,7 @@ func (m *Controller) provisionAction(ctx context.Context, rr *odhtypes.Reconcili
 		Provider:       provider,
 		Postgres:       pgClient,
 		ProviderConfig: resolvedCfg,
+		ClientFactory:  m.PostgresClientFactory,
 	}
 	secret, err := provisioner.Ensure(ctx)
 	if notFound, ok := errors.AsType[claimerrors.DatabaseNotFound](err); ok {
@@ -128,12 +134,31 @@ func (m *Controller) provisionAction(ctx context.Context, rr *odhtypes.Reconcili
 		// Terminal policy denial: do not polite-requeue; wait for a claim/provider change.
 		return odherrors.NewStopErrorW(denied)
 	}
+	if secretNotOwned, ok := errors.AsType[claimerrors.SecretNotOwned](err); ok {
+		rr.Conditions.Mark(ConditionProvisioned, metav1.ConditionFalse,
+			conditions.WithReason("SecretNotOwned"),
+			conditions.WithMessage(secretNotOwned.Error()))
+		return odherrors.NewStopErrorW(secretNotOwned)
+	}
+	if missingExt, ok := errors.AsType[claimerrors.ExtensionNotAvailable](err); ok {
+		rr.Conditions.Mark(ConditionProvisioned, metav1.ConditionFalse,
+			conditions.WithReason("ExtensionNotAvailable"),
+			conditions.WithMessage(missingExt.Error()))
+		// Out-of-band install in the target DB; requeue like DatabaseNotFound.
+		return odherrors.NewStopErrorW(missingExt).WithRequeueAfter(m.retryInterval())
+	}
 	if err != nil {
 		rr.Conditions.Mark(ConditionProvisioned, metav1.ConditionFalse,
 			conditions.WithError(err))
 		return err
 	}
 
+	// Owns(Secret) is deferred (scoped cache); set the controller ownerRef so
+	// GC removes the Secret after the claim is deleted, and so AC checks that
+	// expect an owner reference to the claim succeed.
+	if err := controllerutil.SetControllerReference(obj, secret, rr.Client.Scheme()); err != nil {
+		return fmt.Errorf("setting credentials Secret owner reference: %w", err)
+	}
 	if err := rr.AddResources(secret); err != nil {
 		return fmt.Errorf("adding credentials Secret to resources: %w", err)
 	}
@@ -185,8 +210,11 @@ func (m *Controller) cleanupAction(ctx context.Context, rr *odhtypes.Reconciliat
 	// Cleanup must stay on the provider this claim bound to. Never re-resolve
 	// via selector: a rebound provider could DropDatabase on the wrong backend
 	// when DeletionPolicy=Delete.
+	//
+	// Owns(Secret) is deferred, so deploy may not rely on GC alone. Always
+	// delete the credentials Secret once Postgres cleanup is done or skipped.
 	if obj.Status.Provider == "" {
-		return nil
+		return deleteClaimCredentialsSecret(ctx, rr.Client, obj)
 	}
 	provider, err := dbcontroller.ResolveForCurrent(
 		ctx,
@@ -195,9 +223,8 @@ func (m *Controller) cleanupAction(ctx context.Context, rr *odhtypes.Reconciliat
 		"",
 	)
 	if err != nil {
-		var notFound dbcontroller.ErrNotFound
-		if errors.As(err, &notFound) {
-			return nil
+		if _, ok := errors.AsType[dbcontroller.ErrNotFound](err); ok {
+			return deleteClaimCredentialsSecret(ctx, rr.Client, obj)
 		}
 		return err
 	}
@@ -248,11 +275,50 @@ func (m *Controller) cleanupAction(ctx context.Context, rr *odhtypes.Reconciliat
 	if err != nil {
 		return fmt.Errorf("listing DatabaseClaims before database drop: %w", err)
 	}
-	if dbcontroller.ShouldDropClaimDatabase(obj, providerCfg.DBName, others) {
-		if err := postgres.DropDatabase(ctx, pgClient, database); err != nil {
-			return fmt.Errorf("dropping database %q: %w", database, err)
+
+	// Skip SchemaClaim listing when we would not drop anyway (e.g. Retain).
+	if !dbcontroller.ShouldDropClaimDatabase(obj, providerCfg.DBName, others, nil) {
+		return deleteClaimCredentialsSecret(ctx, rr.Client, obj)
+	}
+	schemaClaims, err := dbcontroller.ListSchemaClaims(ctx, rr.Client)
+	if err != nil {
+		if !schemaClaimAPIUnavailable(err) {
+			return fmt.Errorf("listing SchemaClaims before database drop: %w", err)
 		}
+		// SchemaClaim CRD/API absent: nothing to protect.
+	} else if !dbcontroller.ShouldDropClaimDatabase(obj, providerCfg.DBName, others, schemaClaims) {
+		return deleteClaimCredentialsSecret(ctx, rr.Client, obj)
+	}
+	if err := postgres.DropDatabase(ctx, pgClient, database); err != nil {
+		return fmt.Errorf("dropping database %q: %w", database, err)
+	}
+	return deleteClaimCredentialsSecret(ctx, rr.Client, obj)
+}
+
+func deleteClaimCredentialsSecret(ctx context.Context, cli client.Client, claim *infraApi.DatabaseClaim) error {
+	key := client.ObjectKey{
+		Name:      dbcontroller.SecretNameForDatabaseClaim(claim),
+		Namespace: claim.Namespace,
+	}
+	secret := &corev1.Secret{}
+	if err := cli.Get(ctx, key, secret); err != nil {
+		return client.IgnoreNotFound(err)
 	}
 
+	// Name alone is not enough: SchemaClaim "foo" and DatabaseClaim "sc-foo"
+	// both default to Secret "sc-foo". Delete only when this claim is the
+	// controller owner (including when the claim never provisioned).
+	owner := metav1.GetControllerOf(secret)
+	if owner == nil || owner.UID != claim.UID {
+		return nil
+	}
+
+	if err := cli.Delete(ctx, secret); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("deleting credentials Secret %s/%s: %w", key.Namespace, key.Name, err)
+	}
 	return nil
+}
+
+func schemaClaimAPIUnavailable(err error) bool {
+	return meta.IsNoMatchError(err) || apierrors.IsNotFound(err)
 }

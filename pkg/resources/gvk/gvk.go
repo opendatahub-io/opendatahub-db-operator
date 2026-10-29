@@ -38,6 +38,8 @@ var (
 	Deployment                     = fwgvk.Deployment
 	ServiceAccount                 = fwgvk.ServiceAccount
 	ConfigMap                      = fwgvk.ConfigMap
+	Service                        = fwgvk.Service
+	ClusterRole                    = fwgvk.ClusterRole
 	ClusterRoleBinding             = fwgvk.ClusterRoleBinding
 	RoleBinding                    = fwgvk.RoleBinding
 	MutatingWebhookConfiguration   = fwgvk.MutatingWebhookConfiguration
@@ -53,4 +55,13 @@ var (
 var (
 	DatabaseProvider     = infraApi.SchemeGroupVersion.WithKind("DatabaseProvider")
 	DatabaseProviderList = infraApi.SchemeGroupVersion.WithKind("DatabaseProviderList")
+	DatabaseClaim        = infraApi.SchemeGroupVersion.WithKind("DatabaseClaim")
+	SchemaClaim          = infraApi.SchemeGroupVersion.WithKind("SchemaClaim")
+
+	// SecurityContextConstraints is the OpenShift SCC kind. Absent on Kind.
+	SecurityContextConstraints = schema.GroupVersionKind{
+		Group:   "security.openshift.io",
+		Version: "v1",
+		Kind:    "SecurityContextConstraints",
+	}
 )

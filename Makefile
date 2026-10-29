@@ -75,9 +75,14 @@ lint-fix: ## Run golangci-lint linter and perform fixes.
 lint-config: ## Verify golangci-lint linter configuration.
 	$(GOLANGCI_LINT) config verify
 
+UNIT_TEST_PACKAGES ?= ./api/... ./assets/... ./cmd/... ./internal/... ./pkg/... ./test/support/...
+
 .PHONY: test
-test: ## Run unit tests (everything outside test/integration, test/envtest, and test/e2e).
-	go test $$(go list ./... | grep -v '/test/integration' | grep -v '/test/envtest' | grep -v '/test/e2e') -coverprofile cover.out
+test: test-unit ## Run unit tests.
+
+.PHONY: test-unit
+test-unit: ## Run unit tests in the selected packages without a cluster.
+	go test $(UNIT_TEST_PACKAGES) -coverprofile cover.out
 
 .PHONY: test-envtest
 test-envtest: manifests ## Run the envtest-based reconciler suite (no external cluster required).
@@ -107,19 +112,50 @@ test-integration: test-integration-setup test-integration-run ## Set up and run 
 test-e2e-setup: test-e2e-context-check test-e2e-cert-manager ## Install cert-manager if absent, build/load the manager image, and install the Helm chart into Kind.
 	$(KUBECTL) get --raw=/readyz >/dev/null
 	$(MAKE) test-e2e-teardown
+	# Helm does not update CRDs; include module operand CRDs the standalone chart does not package.
+	$(KUBECTL) apply -f config/crd/bases/services.platform.opendatahub.io_databaseservices.yaml \
+		-f config/crd/bases/infrastructure.opendatahub.io_databaseproviders.yaml \
+		-f config/crd/bases/infrastructure.opendatahub.io_databaseclaims.yaml \
+		-f config/crd/bases/infrastructure.opendatahub.io_schemaclaims.yaml
+	$(KUBECTL) wait --for=condition=Established --timeout=60s \
+		crd/databaseservices.services.platform.opendatahub.io \
+		crd/databaseproviders.infrastructure.opendatahub.io \
+		crd/databaseclaims.infrastructure.opendatahub.io \
+		crd/schemaclaims.infrastructure.opendatahub.io
 	$(MAKE) container-build IMG="$(IMG)"
 	$(MAKE) container-load-kind IMG="$(IMG)" KIND_CLUSTER="$(KIND_CLUSTER)"
-	$(HELM) install "$(E2E_RELEASE)" config/chart \
-		--namespace "$(E2E_NAMESPACE)" --create-namespace --atomic --wait --timeout 5m \
-		--set-string operator.image.ref="$(IMG)" \
-		--set-string operator.image.pullPolicy=IfNotPresent \
-		--set monitoring.serviceMonitor.enabled=false || { \
-			install_status=$$?; \
-			if ! $(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m; then \
-				echo "e2e setup failed and namespace $(E2E_NAMESPACE) cleanup also failed" >&2; \
-			fi; \
-			exit "$$install_status"; \
-		}
+# The bootstrap webhook certificate needs cert-manager; provider/claim tests do not.
+	@cleanup() { \
+		setup_result=$$?; trap - EXIT; \
+		if [ -n "$$temporary_chart" ] && ! rm -rf "$$temporary_chart"; then setup_result=1; fi; \
+		if [ "$$setup_result" -ne 0 ] && [ "$$namespace_owned" -eq 1 ]; then \
+			$(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m || \
+				echo "e2e setup failed and namespace cleanup also failed" >&2; \
+		fi; \
+		exit "$$setup_result"; \
+	}; \
+	chart=config/chart; temporary_chart=""; namespace_owned=0; trap cleanup EXIT; \
+	if [ "$(E2E_CERT_MANAGER_PROFILE)" = absent ]; then \
+		temporary_chart="$$(mktemp -d)"; \
+		cp -R config/chart/. "$$temporary_chart/"; \
+		rm "$$temporary_chart/templates/cert-manager.io_v1_issuer.yaml" \
+			"$$temporary_chart/templates/cert-manager.io_v1_certificate.yaml"; \
+		$(KUBECTL) create namespace "$(E2E_NAMESPACE)"; \
+		namespace_owned=1; \
+		$(KUBECTL) create secret generic webhook-server-cert \
+			--namespace "$(E2E_NAMESPACE)" \
+			--from-literal=tls.crt=unused --from-literal=tls.key=unused; \
+		chart="$$temporary_chart"; \
+		set -- --set-string 'config.controller\.webhook\.enabled=false'; \
+	else \
+		namespace_owned=1; \
+	fi; \
+		$(HELM) install "$(E2E_RELEASE)" "$$chart" \
+			--namespace "$(E2E_NAMESPACE)" --create-namespace --atomic --wait --timeout 5m \
+			--set-string operator.image.ref="$(IMG)" \
+			--set-string operator.image.pullPolicy=IfNotPresent \
+			--set monitoring.serviceMonitor.enabled=false \
+			--set-string config.postgres-image="$(E2E_INTERNAL_POSTGRES_IMAGE)" "$$@"
 
 .PHONY: test-e2e-run
 test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconciles DatabaseService, then clean up.
@@ -139,7 +175,11 @@ test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconci
 	ODH_E2E_NAMESPACE="$(E2E_NAMESPACE)" \
 	ODH_E2E_RELEASE="$(E2E_RELEASE)" \
 	ODH_E2E_OPERATOR_IMAGE="$(IMG)" \
-		go test ./test/e2e/... -v -count=1 -timeout 10m -failfast
+	ODH_E2E_CERT_MANAGER_PROFILE="$(E2E_CERT_MANAGER_PROFILE)" \
+	ODH_E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE="$(E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE)" \
+	ODH_E2E_EXTERNAL_ADMIN_SECRET_NAME="$(E2E_EXTERNAL_ADMIN_SECRET_NAME)" \
+	ODH_E2E_CONSUMER_IMAGE="$(E2E_CONSUMER_IMAGE)" \
+		go test ./test/e2e/... -v -timeout 20m
 
 .PHONY: test-e2e-teardown
 test-e2e-teardown: test-e2e-context-check ## Remove the e2e DatabaseService, Helm release, and namespace.
@@ -162,18 +202,44 @@ test-e2e-context-check:
 
 .PHONY: test-e2e-cert-manager
 test-e2e-cert-manager: test-e2e-context-check ## Install cert-manager into the Kind cluster if absent, then wait for it.
-	@if $(KUBECTL) get crd certificates.cert-manager.io >/dev/null 2>&1; then \
+	@manifest="$$(mktemp -d)/cert-manager.yaml"; \
+	cleanup() { rm -rf "$${manifest%/*}"; }; trap cleanup EXIT; \
+	if $(KUBECTL) get crd certificates.cert-manager.io >/dev/null 2>&1; then \
 		echo "cert-manager already installed; skipping"; \
 	else \
 		echo "installing cert-manager $(CERT_MANAGER_VERSION)"; \
-		$(KUBECTL) apply -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml; \
+		if ! curl --fail --location --silent --show-error --output "$$manifest" \
+			"https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml"; then \
+			exit 1; \
+		fi; \
+		if ! printf '%s  %s\n' "$(CERT_MANAGER_SHA256)" "$$manifest" | sha256sum --check --status; then \
+			echo "cert-manager manifest digest mismatch for $(CERT_MANAGER_VERSION)" >&2; \
+			exit 1; \
+		fi; \
+		$(KUBECTL) apply -f "$$manifest"; \
 	fi
-	$(KUBECTL) -n cert-manager wait --for=condition=Available deployment --all --timeout=300s
+	$(KUBECTL) wait --for=condition=Established crd/certificates.cert-manager.io --timeout=60s
+	if [ -z "$$($(KUBECTL) get deployments -A --selector=app.kubernetes.io/instance=cert-manager -o name)" ]; then \
+		echo "no cert-manager Deployments found in any namespace" >&2; exit 1; \
+	fi
+	$(KUBECTL) wait --for=condition=Available deployment --all --all-namespaces \
+		--selector=app.kubernetes.io/instance=cert-manager --timeout=300s
 
 .PHONY: test-e2e
 test-e2e: ## Set up and run e2e tests.
 	$(MAKE) test-e2e-setup
 	$(MAKE) test-e2e-run
+
+.PHONY: test-e2e-providers
+test-e2e-providers: ## Run the Internal and External provider lifecycles on a Kind cluster.
+	@test -n "$(E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE)" -a -n "$(E2E_EXTERNAL_ADMIN_SECRET_NAME)" || { \
+		echo "set E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE and E2E_EXTERNAL_ADMIN_SECRET_NAME" >&2; exit 1; \
+	}
+	@case "$(E2E_CERT_MANAGER_PROFILE)" in present|absent) ;; *) \
+		echo "set E2E_CERT_MANAGER_PROFILE to present or absent" >&2; exit 1 ;; \
+	esac
+	$(MAKE) test-e2e-context-check
+	$(MAKE) test-e2e
 
 ##@ Build
 
@@ -209,6 +275,24 @@ container-build: ## Build container image with the manager (podman).
 container-push: ## Push container image with the manager.
 	$(CONTAINER_TOOL) push "$(IMG)"
 
+E2E_IMG ?= quay.io/rhoai/odh-db-operator-e2e-rhel9:dev
+E2E_CONTEXT ?=
+E2E_ARTIFACTS ?= $(CURDIR)/bin/e2e-artifacts
+E2E_TEST_PATTERN ?= ^TestHelmInstalledManagerReconcilesDatabaseService$$
+
+.PHONY: e2e-image-build
+e2e-image-build: ## Build the e2e test image (context: repo root).
+	"$(CONTAINER_TOOL)" build -f test/e2e/Containerfile -t "$(E2E_IMG)" .
+
+.PHONY: e2e-image-run
+e2e-image-run: ## Run the e2e image lifecycle on E2E_CONTEXT and save reports locally.
+	@CONTAINER_TOOL="$(CONTAINER_TOOL)" KUBECTL="$(KUBECTL)" \
+		E2E_IMG="$(E2E_IMG)" E2E_CONTEXT="$(E2E_CONTEXT)" \
+		E2E_ARTIFACTS="$(E2E_ARTIFACTS)" E2E_TEST_PATTERN='$(E2E_TEST_PATTERN)' \
+		ODH_E2E_OPERATOR_IMAGE="$(IMG)" ODH_E2E_NAMESPACE="$(E2E_NAMESPACE)" \
+		ODH_E2E_RELEASE="$(E2E_RELEASE)" \
+		bash test/e2e/scripts/run-image.sh
+
 KIND_CLUSTER ?= db-operator-dev
 TEST_INTEGRATION_CONTEXT ?= kind-$(KIND_CLUSTER)
 E2E_NAMESPACE ?= opendatahub-db-operator-e2e
@@ -216,6 +300,12 @@ E2E_RELEASE   ?= opendatahub-db-operator-e2e
 # Installed by test-e2e-cert-manager when absent: the chart's webhook serving
 # certificate and internal-provider TLS both require cert-manager on the cluster.
 CERT_MANAGER_VERSION ?= v1.17.2
+override CERT_MANAGER_SHA256 := dab2794176629d8042ce97b885f378dfe4ef7b5bed5859e9f06616ead9980f4b
+E2E_CERT_MANAGER_PROFILE ?=
+E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE ?=
+E2E_EXTERNAL_ADMIN_SECRET_NAME ?=
+E2E_CONSUMER_IMAGE ?= postgres:16
+E2E_INTERNAL_POSTGRES_IMAGE ?= quay.io/sclorg/postgresql-16-c9s@sha256:66566a27e08ec28d739c5fc54dcd47a4f0b505682d469589e9d493ae0b7bc9ab
 
 .PHONY: container-load-kind
 container-load-kind: ## Load $(IMG) into a Kind cluster. `kind load docker-image` doesn't work with the podman provider.
@@ -228,7 +318,9 @@ container-load-kind: ## Load $(IMG) into a Kind cluster. `kind load docker-image
 .PHONY: helm
 helm: manifests generate ## Generate and lint the Helm chart from kustomize output via chartgen.
 	# Chartgen stages output before replacing chart artifacts; do not delete config/chart before running it.
-	$(KUSTOMIZE) build config/default | go run ./cmd/main.go chartgen --output config/chart
+	# Merge OpenShift install-time SCC/ClusterRole (no namePrefix) after config/default.
+	{ $(KUSTOMIZE) build config/default; echo '---'; $(KUSTOMIZE) build config/openshift; } | \
+		go run ./cmd/main.go chartgen --output config/chart
 	$(HELM) lint config/chart
 
 ##@ Deployment

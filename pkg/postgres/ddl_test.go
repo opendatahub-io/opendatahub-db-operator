@@ -36,8 +36,8 @@ func openPool(t *testing.T, cfg postgres.Config) postgres.Client {
 	return pool
 }
 
-// TestDDL_CreateDropSchema verifies that CreateSchema and DropSchemaCascade
-// are idempotent.
+// TestDDL_CreateDropSchema verifies CreateSchema and DropSchemaCascade are
+// idempotent, and CreateSchema does not write an ownership marker.
 func TestDDL_CreateDropSchema(t *testing.T) {
 	g := NewWithT(t)
 	cfg := startPostgres(t)
@@ -49,9 +49,31 @@ func TestDDL_CreateDropSchema(t *testing.T) {
 	// Second call is idempotent
 	g.Expect(postgres.CreateSchema(ctx, pool, "myschema")).To(Succeed())
 
+	uid, err := postgres.SchemaOwnerClaimUID(ctx, pool, "myschema")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(uid).To(BeEmpty())
+
 	// Drop -- also idempotent
 	g.Expect(postgres.DropSchemaCascade(ctx, pool, "myschema")).To(Succeed())
 	g.Expect(postgres.DropSchemaCascade(ctx, pool, "myschema")).To(Succeed())
+}
+
+func TestDDL_CreateSchemaExclusiveWithOwner(t *testing.T) {
+	g := NewWithT(t)
+	cfg := startPostgres(t)
+
+	ctx := t.Context()
+	pool := openPool(t, cfg)
+
+	g.Expect(postgres.CreateSchemaExclusiveWithOwner(ctx, pool, "owned_schema", "claim-uid-1")).To(Succeed())
+	uid, err := postgres.SchemaOwnerClaimUID(ctx, pool, "owned_schema")
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(uid).To(Equal("claim-uid-1"))
+
+	err = postgres.CreateSchemaExclusiveWithOwner(ctx, pool, "owned_schema", "claim-uid-2")
+	g.Expect(postgres.IsDuplicateSchema(err)).To(BeTrue())
+
+	g.Expect(postgres.DropSchemaCascade(ctx, pool, "owned_schema")).To(Succeed())
 }
 
 func TestDDL_EnsureDropRole(t *testing.T) {
@@ -222,6 +244,12 @@ func TestDDL_GrantSchemaPrivileges(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			_, err = pool.Exec(ctx, fmt.Sprintf("INSERT INTO %s.t VALUES (1)", postgres.QuoteIdentifier(schema)))
 			g.Expect(err).NotTo(HaveOccurred())
+			// Create before grants so ON ALL SEQUENCES covers the serial sequence.
+			_, err = pool.Exec(ctx, fmt.Sprintf(
+				"CREATE TABLE %s.serial_t (id serial PRIMARY KEY, name text)",
+				postgres.QuoteIdentifier(schema),
+			))
+			g.Expect(err).NotTo(HaveOccurred())
 
 			g.Expect(postgres.EnsureRole(ctx, pool, role, pw)).To(Succeed())
 			g.Expect(postgres.GrantSchemaPrivileges(ctx, pool, schema, role, tc.accessMode)).To(Succeed())
@@ -252,6 +280,24 @@ func TestDDL_GrantSchemaPrivileges(t *testing.T) {
 					fmt.Sprintf("readwrite role should be able to create tables: %v", createErr))
 			} else {
 				g.Expect(createErr).To(HaveOccurred(), "readonly role must not be able to create tables")
+			}
+
+			// serial inserts need sequence privileges, not only table DML.
+			_, insertErr := rolePool.Exec(ctx, fmt.Sprintf(
+				"INSERT INTO %s.serial_t (name) VALUES ('ada')",
+				postgres.QuoteIdentifier(schema),
+			))
+			if tc.canWrite {
+				g.Expect(insertErr).To(Succeed(),
+					fmt.Sprintf("readwrite role should insert into serial tables: %v", insertErr))
+			} else {
+				g.Expect(insertErr).To(HaveOccurred(), "readonly role must not insert into serial tables")
+				// ReadOnly must not get sequence USAGE (nextval advances the counter).
+				_, nextErr := rolePool.Exec(ctx, fmt.Sprintf(
+					"SELECT nextval(pg_get_serial_sequence(%s, 'id'))",
+					postgres.QuoteLiteral(schema+".serial_t"),
+				))
+				g.Expect(nextErr).To(HaveOccurred(), "readonly role must not call nextval")
 			}
 		})
 	}
@@ -324,4 +370,16 @@ func TestDDL_DatabaseExists(t *testing.T) {
 	notExists, err := postgres.DatabaseExists(ctx, pool, "totally_nonexistent_db_xyz")
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(notExists).To(BeFalse())
+}
+
+func TestDDL_MissingExtensions(t *testing.T) {
+	g := NewWithT(t)
+	cfg := startPostgres(t)
+
+	ctx := t.Context()
+	pool := openPool(t, cfg)
+
+	missing, err := postgres.MissingExtensions(ctx, pool, []string{"plpgsql", "totally_nonexistent_ext_xyz"})
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(missing).To(Equal([]string{"totally_nonexistent_ext_xyz"}))
 }

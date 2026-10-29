@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.serviceMonitor.enabled }}
+{{- if and .Values.monitoring.serviceMonitor.enabled (or .Values.openshift.serviceCA (.Capabilities.APIVersions.Has "security.openshift.io/v1")) }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

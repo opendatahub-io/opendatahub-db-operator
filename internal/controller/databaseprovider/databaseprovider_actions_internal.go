@@ -77,7 +77,20 @@ func (m *Controller) reconcileInternalAction(
 	}
 
 	markInternalTLSConfiguration(rr, tlsState, nil)
-	return m.addInternalResources(ctx, rr, obj, tlsState)
+
+	// Discover SCC once and share the result so Ensure and RoleBinding cannot
+	// disagree within the same reconcile.
+	sccAvailable, err := dbcontroller.SecurityContextConstraintsAvailable(rr.Client)
+	if err != nil {
+		return fmt.Errorf("checking SecurityContextConstraints API: %w", err)
+	}
+	// On OpenShift the install-time SCC must already exist before the
+	// StatefulSet is admitted. The reconciler verifies; it does not create.
+	if err := dbcontroller.EnsureInternalPostgresSCC(ctx, rr.Client, sccAvailable); err != nil {
+		return fmt.Errorf("ensuring Internal Postgres SCC: %w", err)
+	}
+
+	return m.addInternalResources(ctx, rr, obj, tlsState, sccAvailable)
 }
 
 func (m *Controller) reportInternalAdminSecretFailure(
@@ -132,6 +145,7 @@ func (m *Controller) addInternalResources(
 	rr *odhtypes.ReconciliationRequest,
 	obj *infraApi.DatabaseProvider,
 	tlsState TLSState,
+	sccAvailable bool,
 ) error {
 	data, err := resolveInternalData(ctx, rr.Client, obj, m.cfg, tlsState)
 	if err != nil {
@@ -149,6 +163,17 @@ func (m *Controller) addInternalResources(
 		}
 		if err := rr.AddResources(&pgres[i]); err != nil {
 			return fmt.Errorf("adding internal resources: %w", err)
+		}
+	}
+
+	if sccAvailable {
+		binding := dbcontroller.DesiredInternalPostgresSCCRoleBinding(
+			data.Namespace,
+			data.ServiceAccountName,
+			obj.Name,
+		)
+		if err := rr.AddResources(binding); err != nil {
+			return fmt.Errorf("adding Internal Postgres SCC RoleBinding: %w", err)
 		}
 	}
 

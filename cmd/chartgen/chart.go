@@ -43,7 +43,13 @@ const (
 
 	tplReleaseNamespace   = "namespace: {{ .Release.Namespace }}"
 	tplServiceAccountName = `{{ default (include "chart.fullname" .) .Values.serviceAccount.name }}`
-	serviceMonitorGate    = `{{- if .Values.monitoring.serviceMonitor.enabled }}`
+	tplChartFullname      = `{{ include "chart.fullname" . }}`
+	serviceCAGate         = `or .Values.openshift.serviceCA ` +
+		`(.Capabilities.APIVersions.Has "security.openshift.io/v1")`
+	serviceMonitorGate         = `{{- if and .Values.monitoring.serviceMonitor.enabled (` + serviceCAGate + `) }}`
+	metricsReaderRoleName      = "odh-db-operator-metrics-reader"
+	serviceCAAnnotation        = "service.beta.openshift.io/inject-cabundle"
+	serviceCAServingAnnotation = "service.beta.openshift.io/serving-cert-secret-name"
 
 	annotationCertManagerInjectCAFrom = "cert-manager.io/inject-ca-from"
 
@@ -149,7 +155,28 @@ func renderGroup(
 		parts = append(parts, transformed)
 	}
 
-	return strings.Join(parts, "\n---\n"), nil
+	content := strings.Join(parts, "\n---\n")
+	if resourceGVK == gvk.SecurityContextConstraints {
+		// Kind and vanilla Kubernetes lack this API; skip at install time.
+		return wrapOpenShiftAPIGuard(content), nil
+	}
+	return content, nil
+}
+
+// wrapOpenShiftAPIGuard renders the content when either the OpenShift SCC API
+// is discoverable (standalone helm install/upgrade against a live cluster) or
+// Values.openshift.securityContextConstraints is true.
+//
+// The ODH platform operator renders charts offline via renderer-helm with
+// nil Capabilities (DefaultCapabilities only), so Capabilities alone would
+// skip the SCC on OpenShift. Module handlers set the Values flag for that path.
+func wrapOpenShiftAPIGuard(content string) string {
+	const (
+		begin = "{{- if or .Values.openshift.securityContextConstraints" +
+			" (.Capabilities.APIVersions.Has \"security.openshift.io/v1\") }}\n"
+		end = "\n{{- end }}\n"
+	)
+	return begin + content + end
 }
 
 var stripLabelKeys = []string{
@@ -231,8 +258,15 @@ func transformResource(
 		// .Values.platform.*/.Values.config templating meant for a
 		// different ConfigMap entirely. Namespace-qualified: a same-named
 		// ConfigMap in some other namespace is a different object.
+		if hasAnnotation(obj, serviceCAAnnotation) {
+			return transformServiceCAConfigMap(obj)
+		}
 		return transformGeneric(obj)
-	case gvk.ClusterRoleBinding, gvk.RoleBinding:
+	case gvk.ClusterRole:
+		return transformClusterRole(obj)
+	case gvk.ClusterRoleBinding:
+		return transformClusterRoleBinding(obj, chartCtx.operatorServiceAccount, chartCtx.operatorServiceAccountManaged)
+	case gvk.RoleBinding:
 		return transformRoleBinding(obj, chartCtx.operatorServiceAccount, chartCtx.operatorServiceAccountManaged)
 	case gvk.MutatingWebhookConfiguration, gvk.ValidatingWebhookConfiguration:
 		return transformWebhook(obj)
@@ -240,6 +274,8 @@ func transformResource(
 		return transformCertificate(obj)
 	case gvk.ServiceMonitor:
 		return transformServiceMonitor(obj)
+	case gvk.Service:
+		return transformService(obj)
 	default:
 		return transformGeneric(obj)
 	}
@@ -577,6 +613,21 @@ func transformRoleBinding(
 	operatorServiceAccount types.NamespacedName,
 	renameManaged bool,
 ) (string, error) {
+	roleRef, found, err := unstructured.NestedMap(obj.Object, "roleRef")
+	if err != nil {
+		return "", fmt.Errorf("reading roleRef: %w", err)
+	}
+	if found {
+		roleName, _ := roleRef["name"].(string)
+		roleKind, _ := roleRef["kind"].(string)
+		if roleKind == "ClusterRole" && strings.HasPrefix(roleName, "odh-db-operator-") {
+			roleRef["name"] = releaseScopedName(roleName)
+			if err := unstructured.SetNestedMap(obj.Object, roleRef, "roleRef"); err != nil {
+				return "", err
+			}
+		}
+	}
+
 	if err := stampOperatorSubjectPlaceholders(obj, operatorServiceAccount, renameManaged); err != nil {
 		return "", fmt.Errorf("role binding %s: %w", obj.GetName(), err)
 	}
@@ -590,6 +641,82 @@ func transformRoleBinding(
 	raw = replaceSubjectPlaceholders(raw)
 
 	return raw, nil
+}
+
+func releaseScopedName(name string) string {
+	suffix := strings.TrimPrefix(name, "odh-db-operator-")
+	return fmt.Sprintf(
+		`{{ include "chart.clusterResourceName" (dict "root" . "suffix" %q) }}`,
+		suffix,
+	)
+}
+
+func transformClusterRole(obj *unstructured.Unstructured) (string, error) {
+	obj.SetName(releaseScopedName(obj.GetName()))
+	return transformGeneric(obj)
+}
+
+func transformClusterRoleBinding(
+	obj *unstructured.Unstructured,
+	operatorServiceAccount types.NamespacedName,
+	renameManaged bool,
+) (string, error) {
+	roleRef, found, err := unstructured.NestedMap(obj.Object, "roleRef")
+	if err != nil {
+		return "", fmt.Errorf("reading roleRef: %w", err)
+	}
+	if !found {
+		return "", fmt.Errorf("roleRef is missing")
+	}
+	roleName, _ := roleRef["name"].(string)
+	metricsReaderBinding := strings.HasSuffix(roleName, "-metrics-reader")
+	if roleName != "" {
+		roleRef["name"] = releaseScopedName(roleName)
+		if err := unstructured.SetNestedMap(obj.Object, roleRef, "roleRef"); err != nil {
+			return "", err
+		}
+	}
+
+	if err := stampOperatorSubjectPlaceholders(obj, operatorServiceAccount, renameManaged); err != nil {
+		return "", fmt.Errorf("role binding %s: %w", obj.GetName(), err)
+	}
+
+	if metricsReaderBinding {
+		if err := configureCollectorSubject(obj); err != nil {
+			return "", err
+		}
+	}
+
+	obj.SetName(releaseScopedName(obj.GetName()))
+	raw, err := marshalResource(obj)
+	if err != nil {
+		return "", err
+	}
+
+	raw = replaceNamespace(raw)
+	raw = replaceSubjectPlaceholders(raw)
+	return raw, nil
+}
+
+func configureCollectorSubject(obj *unstructured.Unstructured) error {
+	subjects, found, err := unstructured.NestedSlice(obj.Object, "subjects")
+	if err != nil {
+		return fmt.Errorf("reading subjects: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("subjects are missing")
+	}
+
+	for _, item := range subjects {
+		subject, ok := item.(map[string]any)
+		if !ok || subject["kind"] != "ServiceAccount" {
+			continue
+		}
+		subject["name"] = "{{ .Values.monitoring.serviceMonitor.collector.serviceAccount.name }}"
+		subject["namespace"] = "{{ .Values.monitoring.serviceMonitor.collector.serviceAccount.namespace }}"
+	}
+
+	return unstructured.SetNestedSlice(obj.Object, subjects, "subjects")
 }
 
 // stampOperatorSubjectPlaceholders overwrites the namespace (always, when
@@ -794,6 +921,51 @@ func transformServiceMonitor(obj *unstructured.Unstructured) (string, error) {
 	raw = replaceServiceMonitorServerName(raw)
 
 	return serviceMonitorGate + "\n" + raw + "\n{{- end }}", nil
+}
+
+func hasAnnotation(obj *unstructured.Unstructured, key string) bool {
+	_, found := obj.GetAnnotations()[key]
+	return found
+}
+
+func transformServiceCAConfigMap(obj *unstructured.Unstructured) (string, error) {
+	raw, err := transformGeneric(obj)
+	if err != nil {
+		return "", err
+	}
+
+	return "{{- if " + serviceCAGate + " }}\n" + raw + "\n{{- end }}", nil
+}
+
+func transformService(obj *unstructured.Unstructured) (string, error) {
+	raw, err := transformGeneric(obj)
+	if err != nil {
+		return "", err
+	}
+	if !hasAnnotation(obj, serviceCAServingAnnotation) {
+		return raw, nil
+	}
+
+	return gateServiceAnnotation(raw), nil
+}
+
+func gateServiceAnnotation(raw string) string {
+	lines := strings.Split(raw, "\n")
+	for index, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), serviceCAServingAnnotation+":") {
+			continue
+		}
+
+		indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+		gated := []string{
+			indent + "{{- if " + serviceCAGate + " }}",
+			line,
+			indent + "{{- end }}",
+		}
+		lines = append(lines[:index], append(gated, lines[index+1:]...)...)
+		return strings.Join(lines, "\n")
+	}
+	return raw
 }
 
 // replaceServiceMonitorServerName replaces the namespace segment in

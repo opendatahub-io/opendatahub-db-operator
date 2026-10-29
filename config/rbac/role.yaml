@@ -12,11 +12,20 @@ rules:
   - ""
   resources:
   - configmaps
-  - persistentvolumeclaims
+  - serviceaccounts
   - services
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - patch
   - watch
 - apiGroups:
   - ""
@@ -78,9 +87,8 @@ rules:
   - infrastructure.opendatahub.io
   resources:
   - databaseclaims
+  - schemaclaims
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
@@ -91,6 +99,7 @@ rules:
   resources:
   - databaseclaims/finalizers
   - databaseproviders/finalizers
+  - schemaclaims/finalizers
   verbs:
   - update
 - apiGroups:
@@ -98,6 +107,7 @@ rules:
   resources:
   - databaseclaims/status
   - databaseproviders/status
+  - schemaclaims/status
   verbs:
   - get
   - patch
@@ -106,10 +116,12 @@ rules:
   - infrastructure.opendatahub.io
   resources:
   - databaseproviders
-  - schemaclaims
   verbs:
+  - create
+  - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - networking.k8s.io
@@ -120,13 +132,37 @@ rules:
   - list
   - watch
 - apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - odh-db-internal-postgres
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - get
+  - use
+- apiGroups:
   - services.platform.opendatahub.io
   resources:
   - databaseservices
   verbs:
   - get
   - list
+  - update
   - watch
+- apiGroups:
+  - services.platform.opendatahub.io
+  resources:
+  - databaseservices/finalizers
+  verbs:
+  - update
 - apiGroups:
   - services.platform.opendatahub.io
   resources:

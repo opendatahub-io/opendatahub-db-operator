@@ -45,6 +45,7 @@ func TestRegisterFlags_DerivesFlagNamesFromConfigStruct(t *testing.T) {
 		"controller-webhook-port",
 		"controller-webhook-cert-dir",
 		"databaseservice-retry-interval",
+		"schemaclaim-retry-interval",
 	} {
 		g.Expect(cmd.Flags().Lookup(name)).NotTo(BeNil(), name)
 	}

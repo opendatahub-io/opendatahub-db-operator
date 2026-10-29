@@ -455,8 +455,10 @@ spec:
         type: object
         x-kubernetes-validations:
         - message: Internal provider metadata.name must be a DNS-1035 label of at
-            most 63 characters because it is used as the Service name
-          rule: self.spec.type != 'Internal' || self.metadata.name.matches('^[a-z]$|^[a-z]([-a-z0-9]{0,61}[a-z0-9])$')
+            most 50 characters so derived ServiceAccount and RoleBinding names stay
+            within the 63-character Kubernetes limit
+          rule: self.spec.type != 'Internal' || (size(self.metadata.name) <= 50 &&
+            self.metadata.name.matches('^[a-z]$|^[a-z]([-a-z0-9]*[a-z0-9])$'))
     served: true
     storage: true
     subresources:

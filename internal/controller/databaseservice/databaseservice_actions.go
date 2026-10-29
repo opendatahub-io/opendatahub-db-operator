@@ -44,10 +44,10 @@ func (m *Module) reportStatus(ctx context.Context, rr *odhtypes.ReconciliationRe
 	if !ok {
 		return fmt.Errorf("instance is not a DatabaseService")
 	}
+	obj.Status.Releases = []common.ComponentRelease{m.cfg.ComponentRelease()}
 	if err := m.aggregateInputs(ctx, rr); err != nil {
 		return err
 	}
-	obj.Status.Releases = []common.ComponentRelease{m.cfg.ComponentRelease()}
 	return nil
 }
 
@@ -56,7 +56,7 @@ func (m *Module) aggregateInputs(
 	rr *odhtypes.ReconciliationRequest,
 ) error {
 	providers := &infraApi.DatabaseProviderList{}
-	if err := rr.Client.List(ctx, providers); err != nil {
+	if err := m.apiReader.List(ctx, providers); err != nil {
 		if meta.IsNoMatchError(err) {
 			message := "DatabaseProvider CRD is not installed; provider health is not available"
 			rr.Conditions.Mark(ConditionProviderHealth, metav1.ConditionFalse,
@@ -71,6 +71,7 @@ func (m *Module) aggregateInputs(
 				conditions.WithSeverity(fwapi.ConditionSeverityInfo),
 				conditions.WithReason("DatabaseProviderCRDMissing"),
 				conditions.WithMessage(message))
+			dbmetrics.PruneProviderMetrics(nil)
 			return nil
 		}
 		return fmt.Errorf("listing DatabaseProviders: %w", err)

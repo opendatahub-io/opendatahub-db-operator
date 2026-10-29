@@ -46,7 +46,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: DatabaseClaimSpec defines the desired state of DatabaseClaim.
+            description: |-
+              DatabaseClaimSpec defines the desired state of DatabaseClaim.
+
+              Field-level self == oldSelf rules do not run when an optional field is
+              removed or when it is first added; these Spec-level presence rules close
+              both gaps so a field cannot be cleared or introduced after create (same
+              pattern as SchemaClaimSpec).
             properties:
               access:
                 default: ReadWrite
@@ -81,8 +87,24 @@ spec:
                 - Retain
                 - Delete
                 type: string
+              extensions:
+                description: |-
+                  Extensions lists PostgreSQL extensions this claim requires in its target
+                  database. Day-one allow-list is vector only. Immutable once set.
+                items:
+                  enum:
+                  - vector
+                  maxLength: 63
+                  type: string
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: extensions are immutable once set
+                  rule: self == oldSelf
               provider:
-                description: Provider selects the DatabaseProvider to provision against.
+                description: |-
+                  Provider selects the DatabaseProvider to provision against. Omission
+                  selects the DatabaseService default provider.
                 properties:
                   name:
                     description: Name is the exact DatabaseProvider name to bind to.
@@ -141,8 +163,8 @@ spec:
                 x-kubernetes-validations:
                 - message: provider is immutable once set
                   rule: self == oldSelf
-                - message: exactly one of name or selector must be set
-                  rule: '(has(self.name) ? 1 : 0) + (has(self.selector) ? 1 : 0) ==
+                - message: name and selector cannot both be set
+                  rule: '(has(self.name) ? 1 : 0) + (has(self.selector) ? 1 : 0) <=
                     1'
               secretName:
                 description: |-
@@ -155,14 +177,17 @@ spec:
                 x-kubernetes-validations:
                 - message: secretName is immutable once set
                   rule: self == oldSelf
-            required:
-            - provider
             type: object
             x-kubernetes-validations:
-            - message: secretName cannot be removed once set
-              rule: '!has(oldSelf.secretName) || has(self.secretName)'
-            - message: database cannot be removed once set
-              rule: '!has(oldSelf.database) || has(self.database)'
+            - message: secretName cannot be added or removed after claim creation
+              rule: has(oldSelf.secretName) == has(self.secretName)
+            - message: database cannot be added or removed after claim creation
+              rule: has(oldSelf.database) == has(self.database)
+            - message: extensions cannot be added or removed after claim creation
+              rule: has(oldSelf.extensions) == has(self.extensions)
+            - message: provider selection cannot be added or removed after claim creation
+              rule: (!has(oldSelf.provider) || (!has(oldSelf.provider.name) && !has(oldSelf.provider.selector)))
+                == (!has(self.provider) || (!has(self.provider.name) && !has(self.provider.selector)))
           status:
             description: |-
               DatabaseClaimStatus defines the observed state of DatabaseClaim. Phase

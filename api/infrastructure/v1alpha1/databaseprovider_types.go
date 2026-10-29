@@ -262,7 +262,10 @@ type DatabaseProviderStatus struct {
 // +kubebuilder:printcolumn:name="Database",type=string,JSONPath=`.status.connection.database`,description="Resolved admin database"
 // +kubebuilder:printcolumn:name="Reachable",type=string,JSONPath=`.status.conditions[?(@.type=="Reachable")].status`,description="Reachable"
 // +kubebuilder:printcolumn:name="Server Version",type=string,JSONPath=`.status.serverVersion`,description="Detected PostgreSQL server version"
-// +kubebuilder:validation:XValidation:rule="self.spec.type != 'Internal' || self.metadata.name.matches('^[a-z]$|^[a-z]([-a-z0-9]{0,61}[a-z0-9])$')",message="Internal provider metadata.name must be a DNS-1035 label of at most 63 characters because it is used as the Service name"
+// Internal names also seed ServiceAccount ({name}-postgres) and SCC RoleBinding
+// ({name}-postgres-scc). Cap at 50 so those derived names stay within the
+// 63-character Kubernetes limit (see controller.MaxInternalProviderNameLength).
+// +kubebuilder:validation:XValidation:rule="self.spec.type != 'Internal' || (size(self.metadata.name) <= 50 && self.metadata.name.matches('^[a-z]$|^[a-z]([-a-z0-9]*[a-z0-9])$'))",message="Internal provider metadata.name must be a DNS-1035 label of at most 50 characters so derived ServiceAccount and RoleBinding names stay within the 63-character Kubernetes limit"
 
 // DatabaseProvider is the Schema for the databaseproviders API.
 type DatabaseProvider struct {

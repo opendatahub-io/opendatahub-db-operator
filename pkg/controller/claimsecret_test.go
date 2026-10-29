@@ -50,3 +50,18 @@ func TestApplyClaimCredentials_ADRContract(t *testing.T) {
 	g.Expect(secret.Data).NotTo(HaveKey(postgres.SecretKeySchema))
 	g.Expect(secret.Data).NotTo(HaveKey("uri"))
 }
+
+func TestApplySchemaClaimCredentials_AddsSchemaKey(t *testing.T) {
+	g := NewWithT(t)
+
+	secret := &corev1.Secret{}
+	controller.ApplySchemaClaimCredentials(secret, postgres.Config{
+		Host: "db.example.svc",
+		Port: 5432,
+	}, "claim_role", "Abc123xyz", "analytics", "app_claim")
+
+	g.Expect(string(secret.Data[postgres.SecretKeySchema])).To(Equal("app_claim"))
+	g.Expect(string(secret.Data[postgres.SecretKeyDatabase])).To(Equal("analytics"))
+	g.Expect(secret.Annotations[postgres.AnnotationConnectionTypeProtocol]).
+		To(Equal(postgres.ConnectionTypeProtocolPostgres))
+}

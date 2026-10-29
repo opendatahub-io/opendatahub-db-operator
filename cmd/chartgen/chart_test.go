@@ -26,6 +26,17 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+func TestWrapOpenShiftAPIGuard(t *testing.T) {
+	g := NewWithT(t)
+	wrapped := wrapOpenShiftAPIGuard("kind: SecurityContextConstraints\n")
+	g.Expect(wrapped).To(HavePrefix(
+		"{{- if or .Values.openshift.securityContextConstraints" +
+			" (.Capabilities.APIVersions.Has \"security.openshift.io/v1\") }}",
+	))
+	g.Expect(wrapped).To(ContainSubstring("kind: SecurityContextConstraints"))
+	g.Expect(wrapped).To(HaveSuffix("{{- end }}\n"))
+}
+
 // The sidecar's "image" field is deliberately its first key (serializes as
 // "- image: ...") -- the shape the old line-prefix matcher missed -- while
 // the manager container's image is not its first key, the shape it did

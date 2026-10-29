@@ -24,9 +24,14 @@ import (
 
 const InternalPostgresReplicaCount int32 = 1
 
+// InternalPostgresUID is the fixed UID/GID for RHEL postgresql-16
+// (registry.redhat.io/rhel9/postgresql-16). OpenShift SCCs must allow this ID.
+const InternalPostgresUID int64 = 26
+
 type Data struct {
-	Namespace    string
-	ProviderName string
+	Namespace          string
+	ProviderName       string
+	ServiceAccountName string
 
 	Service  Service
 	PVC      PVC
@@ -88,13 +93,15 @@ type Duration struct {
 
 func Values(data Data) map[string]any {
 	return map[string]any{
-		"Namespace":    data.Namespace,
-		"ProviderName": data.ProviderName,
-		"Service":      data.Service,
-		"PVC":          data.PVC,
-		"InitDB":       data.InitDB,
-		"Postgres":     data.Postgres,
-		"Network":      data.Network,
-		"TLS":          data.TLS,
+		"Namespace":          data.Namespace,
+		"ProviderName":       data.ProviderName,
+		"ServiceAccountName": data.ServiceAccountName,
+		"PostgresUID":        InternalPostgresUID,
+		"Service":            data.Service,
+		"PVC":                data.PVC,
+		"InitDB":             data.InitDB,
+		"Postgres":           data.Postgres,
+		"Network":            data.Network,
+		"TLS":                data.TLS,
 	}
 }

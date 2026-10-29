@@ -86,8 +86,9 @@ func resolveInternalData(
 	}
 
 	data := pginstance.Data{
-		Namespace:    dbcontroller.InternalNamespace(provider, cfg.OperatorNamespace),
-		ProviderName: provider.Name,
+		Namespace:          dbcontroller.InternalNamespace(provider, cfg.OperatorNamespace),
+		ProviderName:       provider.Name,
+		ServiceAccountName: dbcontroller.InternalServiceAccountName(provider.Name),
 		Service: pginstance.Service{
 			Name: dbcontroller.InternalServiceName(provider.Name),
 		},

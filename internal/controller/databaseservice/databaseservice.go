@@ -23,6 +23,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
@@ -32,12 +33,15 @@ import (
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
+	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
+	"github.com/opendatahub-io/opendatahub-db-operator/pkg/resources/gvk"
 )
 
 // Module holds configuration shared by DatabaseService reconciliations.
 type Module struct {
 	cfg             *moduleconfig.Config
 	platformRelease fwapi.Release
+	apiReader       client.Reader
 }
 
 // NewModule captures cfg's platform release for reconciliation.
@@ -48,8 +52,12 @@ func NewModule(cfg *moduleconfig.Config) *Module {
 	}
 }
 
-// +kubebuilder:rbac:groups=services.platform.opendatahub.io,resources=databaseservices,verbs=get;list;watch
+// +kubebuilder:rbac:groups=services.platform.opendatahub.io,resources=databaseservices,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=services.platform.opendatahub.io,resources=databaseservices/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=services.platform.opendatahub.io,resources=databaseservices/finalizers,verbs=update
+// +kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=databaseproviders,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=schemaclaims;databaseclaims,verbs=list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;secrets,verbs=get;patch
 
 // Baseline RBAC required for all module operators. The CRD grant is
 // deliberately narrower than a typical module operator's: this reconciler
@@ -70,28 +78,41 @@ func NewReconciler(
 	cfg *moduleconfig.Config,
 ) error {
 	m := NewModule(cfg)
+	m.apiReader = mgr.GetAPIReader()
 
 	_, err := reconciler.ReconcilerFor(mgr, &servicesv1alpha1.DatabaseService{}).
-		WithReconcilerOpts(
-			reconciler.WithRelease(m.platformRelease),
-			reconciler.WithDefaultRequeueAfter(retryInterval(cfg)),
-		).
-		WithAction(m.reportStatus).
-		// Provider status changes re-aggregate the service immediately instead
-		// of waiting for the periodic requeue. The watch registers dynamically
-		// (CrdExists) because the DatabaseProvider CRD may not be installed,
-		// and the mapper targets the CEL-enforced singleton by name.
-		Watches(
-			&infraApi.DatabaseProvider{},
-			reconciler.Dynamic(reconciler.CrdExists(infraApi.GroupVersion.WithKind("DatabaseProvider"))),
+		// Provider create and status changes re-aggregate the singleton immediately.
+		// The status-aware predicate is required because ResourceVersion changes can
+		// arrive before the cached list used by aggregation has observed the status.
+		Watches(&infraApi.DatabaseProvider{},
+			reconciler.Dynamic(reconciler.CrdExists(gvk.DatabaseProvider)),
 			reconciler.WithEventMapper(func(_ context.Context, _ client.Object) []reconcile.Request {
 				return []reconcile.Request{{
 					NamespacedName: client.ObjectKey{Name: servicesv1alpha1.DatabaseServiceInstanceName},
 				}}
 			}),
-			reconciler.WithPredicates(dependent.New(dependent.WithWatchStatus(true))),
+			reconciler.WithPredicates(predicate.Or(
+				predicate.ResourceVersionChangedPredicate{},
+				dependent.New(dependent.WithWatchStatus(true)),
+			))).
+		Watches(&infraApi.DatabaseClaim{},
+			reconciler.Dynamic(reconciler.CrdExists(gvk.DatabaseClaim)),
+			reconciler.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			reconciler.WithEventMapper(dbcontroller.BroadcastListMapper(mgr.GetClient(), &servicesv1alpha1.DatabaseServiceList{}))).
+		Watches(&infraApi.SchemaClaim{},
+			reconciler.Dynamic(reconciler.CrdExists(gvk.SchemaClaim)),
+			reconciler.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			reconciler.WithEventMapper(dbcontroller.BroadcastListMapper(mgr.GetClient(), &servicesv1alpha1.DatabaseServiceList{}))).
+		WithReconcilerOpts(
+			reconciler.WithRelease(m.platformRelease),
+			reconciler.WithDefaultRequeueAfter(retryInterval(cfg)),
+			reconciler.WithFinalizerName(defaultProviderCleanupFinalizer),
 		).
+		WithFinalizer(m.cleanupDefaultProvider).
+		WithAction(m.reportStatus).
+		WithAction(m.ensureDefaultProvider).
 		WithConditions(conditions.Dependent(fwapi.ConditionType(ConditionProviderHealth), conditions.HealthyWhenTrue)).
+		WithConditions(conditions.Dependent(conditionDefaultProviderReady, conditions.HealthyWhenTrue)).
 		Build(ctx)
 
 	return err

@@ -10,6 +10,7 @@ rules:
   - persistentvolumeclaims
   - secrets
   - services
+  - serviceaccounts
   verbs:
   - create
   - get
@@ -18,6 +19,14 @@ rules:
   - apps
   resources:
   - statefulsets
+  verbs:
+  - create
+  - get
+  - patch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
   verbs:
   - create
   - get

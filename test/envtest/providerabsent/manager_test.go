@@ -31,6 +31,7 @@ import (
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 	modulemanager "github.com/opendatahub-io/opendatahub-db-operator/pkg/manager"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -93,11 +94,22 @@ func TestDatabaseServiceReconcilesWithoutProviderCRD(t *testing.T) {
 
 		got := &servicesv1alpha1.DatabaseService{}
 		g.Expect(mgr.GetClient().Get(ctx, client.ObjectKeyFromObject(instance), got)).To(Succeed())
-		g.Expect(got.Status.Phase).To(Equal(reconciler.DefaultPhaseReady))
+		g.Expect(got.Status.Phase).To(Equal(reconciler.DefaultPhaseNotReady))
+
+		defaultProvider := conditions.FindStatusCondition(got, "DefaultProviderReady")
+		g.Expect(defaultProvider).NotTo(BeNil())
+		g.Expect(defaultProvider.Status).To(Equal(metav1.ConditionFalse))
+		g.Expect(defaultProvider.Reason).To(Equal("ProviderAPIUnavailable"))
 
 		version := conditions.FindStatusCondition(got, "ServerVersion")
 		g.Expect(version).NotTo(BeNil())
 		g.Expect(version.Status).To(Equal(metav1.ConditionUnknown))
 		g.Expect(version.Reason).To(Equal("DatabaseProviderCRDMissing"))
 	}, 30*time.Second).Should(Succeed())
+
+	g.Expect(mgr.GetClient().Delete(ctx, instance)).To(Succeed())
+	g.Eventually(func() bool {
+		err := mgr.GetClient().Get(ctx, client.ObjectKeyFromObject(instance), &servicesv1alpha1.DatabaseService{})
+		return apierrors.IsNotFound(err)
+	}, 30*time.Second).Should(BeTrue())
 }

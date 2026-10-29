@@ -1,0 +1,74 @@
+name: E2E
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.tekton/**'
+      - '.gitignore'
+      - '.golangci.yml'
+      - 'semgrep.yaml'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.tekton/**'
+      - '.gitignore'
+      - '.golangci.yml'
+      - 'semgrep.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HELM_VERSION: v3.19.0
+  CERT_MANAGER_VERSION: v1.20.4
+
+jobs:
+  e2e:
+    name: Cert-manager ${{ matrix.cert-manager-profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        cert-manager-profile: [present, absent]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: db-operator-e2e-${{ matrix.cert-manager-profile }}
+          wait: 5m
+
+      - name: Install cert-manager
+        if: matrix.cert-manager-profile == 'present'
+        run: |
+          helm install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+            --version "$CERT_MANAGER_VERSION" --namespace cert-manager --create-namespace \
+            --set crds.enabled=true --wait --timeout 5m
+
+      - name: Provision external PostgreSQL target
+        run: bash test/e2e/scripts/setup-external-postgres.sh "db-operator-e2e-${{ matrix.cert-manager-profile }}"
+
+      - name: Run provider lifecycles
+        run: |
+          make test-e2e-providers \
+            KIND_CLUSTER="db-operator-e2e-${{ matrix.cert-manager-profile }}" \
+            CONTAINER_TOOL=docker \
+            E2E_CERT_MANAGER_PROFILE="${{ matrix.cert-manager-profile }}" \
+            E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE=external-postgres \
+            E2E_EXTERNAL_ADMIN_SECRET_NAME=external-postgres-admin

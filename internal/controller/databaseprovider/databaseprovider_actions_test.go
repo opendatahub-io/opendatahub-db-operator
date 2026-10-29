@@ -492,7 +492,7 @@ func TestAddInternalResourcesDefersStatefulSetUntilTLSIsReady(t *testing.T) {
 		PostgresImage:     moduleconfig.DefaultInternalPostgresImage,
 	}}}
 
-	g.Expect(m.addInternalResources(context.Background(), rr, provider, TLSState{Enabled: true})).To(Succeed())
+	g.Expect(m.addInternalResources(context.Background(), rr, provider, TLSState{Enabled: true}, false)).To(Succeed())
 
 	kinds := make(map[string]struct{}, len(rr.Resources))
 	for i := range rr.Resources {

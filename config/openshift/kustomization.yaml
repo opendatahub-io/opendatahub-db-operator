@@ -1,0 +1,6 @@
+# OpenShift-only install-time resources for Internal Postgres (UID/GID 26).
+# Not included in config/default so Kind/vanilla Kubernetes deploys stay clean.
+# The Helm chart merges this overlay and guards the SCC with Capabilities.
+resources:
+- internal_postgres_scc.yaml
+- internal_postgres_scc_clusterrole.yaml

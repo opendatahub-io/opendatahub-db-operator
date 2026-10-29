@@ -26,14 +26,26 @@ spec:
 {{- end}}
 {{- end}}
     spec:
+      serviceAccountName: {{.ServiceAccountName}}
+      automountServiceAccountToken: false
       securityContext:
-        fsGroup: 26
+        runAsUser: {{.PostgresUID}}
+        runAsGroup: {{.PostgresUID}}
+        fsGroup: {{.PostgresUID}}
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: postgres
           image: {{.Postgres.Image}}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
 {{- if .TLS.Enabled}}
           args:
+            - run-postgresql
             - -c
             - ssl=on
             - -c

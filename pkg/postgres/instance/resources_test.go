@@ -15,10 +15,11 @@ import (
 func TestResources_UseRedHatPostgresContainerContract(t *testing.T) {
 	g := NewWithT(t)
 	resources, err := Resources(context.Background(), Data{
-		Namespace:    "database-system",
-		ProviderName: "internal",
-		Service:      Service{Name: "internal"},
-		PVC:          PVC{Name: "internal", Size: "1Gi"},
+		Namespace:          "database-system",
+		ProviderName:       "internal",
+		ServiceAccountName: "internal-postgres",
+		Service:            Service{Name: "internal"},
+		PVC:                PVC{Name: "internal", Size: "1Gi"},
 		InitDB: InitDB{
 			ConfigMapName: "internal-initdb",
 			Extensions:    []string{"pg_trgm", "vector"},
@@ -42,20 +43,39 @@ func TestResources_UseRedHatPostgresContainerContract(t *testing.T) {
 
 	statefulSet := &appsv1.StatefulSet{}
 	configMap := &corev1.ConfigMap{}
+	serviceAccount := &corev1.ServiceAccount{}
 	for i := range resources {
 		switch resources[i].GetKind() {
 		case "StatefulSet":
 			g.Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(resources[i].Object, statefulSet)).To(Succeed())
 		case "ConfigMap":
 			g.Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(resources[i].Object, configMap)).To(Succeed())
+		case "ServiceAccount":
+			g.Expect(runtime.DefaultUnstructuredConverter.FromUnstructured(resources[i].Object, serviceAccount)).To(Succeed())
 		}
 	}
 
+	g.Expect(serviceAccount.Name).To(Equal("internal-postgres"))
+	g.Expect(serviceAccount.AutomountServiceAccountToken).NotTo(BeNil())
+	g.Expect(*serviceAccount.AutomountServiceAccountToken).To(BeFalse())
+	g.Expect(statefulSet.Spec.Template.Spec.ServiceAccountName).To(Equal("internal-postgres"))
 	g.Expect(statefulSet.Spec.Template.Spec.SecurityContext).NotTo(BeNil())
+	g.Expect(statefulSet.Spec.Template.Spec.SecurityContext.RunAsUser).NotTo(BeNil())
+	g.Expect(*statefulSet.Spec.Template.Spec.SecurityContext.RunAsUser).To(Equal(InternalPostgresUID))
+	g.Expect(statefulSet.Spec.Template.Spec.SecurityContext.RunAsGroup).NotTo(BeNil())
+	g.Expect(*statefulSet.Spec.Template.Spec.SecurityContext.RunAsGroup).To(Equal(InternalPostgresUID))
 	g.Expect(statefulSet.Spec.Template.Spec.SecurityContext.FSGroup).NotTo(BeNil())
-	g.Expect(*statefulSet.Spec.Template.Spec.SecurityContext.FSGroup).To(Equal(int64(26)))
+	g.Expect(*statefulSet.Spec.Template.Spec.SecurityContext.FSGroup).To(Equal(InternalPostgresUID))
+	g.Expect(statefulSet.Spec.Template.Spec.SecurityContext.SeccompProfile).NotTo(BeNil())
+	seccomp := statefulSet.Spec.Template.Spec.SecurityContext.SeccompProfile.Type
+	g.Expect(seccomp).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
 	g.Expect(statefulSet.Spec.Template.Spec.Containers).To(HaveLen(1))
 	container := statefulSet.Spec.Template.Spec.Containers[0]
+	g.Expect(container.SecurityContext).NotTo(BeNil())
+	g.Expect(container.SecurityContext.AllowPrivilegeEscalation).NotTo(BeNil())
+	g.Expect(*container.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
+	g.Expect(container.SecurityContext.Capabilities).NotTo(BeNil())
+	g.Expect(container.SecurityContext.Capabilities.Drop).To(Equal([]corev1.Capability{"ALL"}))
 
 	environment := make(map[string]corev1.EnvVar, len(container.Env))
 	for _, env := range container.Env {
@@ -79,6 +99,8 @@ func TestResources_UseRedHatPostgresContainerContract(t *testing.T) {
 	g.Expect(mounts["data"]).To(Equal("/var/lib/pgsql/data"))
 	g.Expect(mounts["initdb"]).To(Equal("/opt/app-root/src/postgresql-init"))
 	g.Expect(mounts["tls"]).To(Equal("/var/lib/pgsql/tls"))
+	g.Expect(container.Args).NotTo(BeEmpty())
+	g.Expect(container.Args[0]).To(Equal("run-postgresql"))
 	g.Expect(container.Args).To(ContainElements(
 		"ssl_cert_file=/var/lib/pgsql/tls/tls.crt",
 		"ssl_key_file=/var/lib/pgsql/tls/tls.key",
@@ -225,11 +247,12 @@ func renderNetworkPolicy(
 	t.Helper()
 	g := NewWithT(t)
 	resources, err := Resources(context.Background(), Data{
-		Namespace:    "test",
-		ProviderName: "provider",
-		Service:      Service{Name: "provider"},
-		PVC:          PVC{Name: "provider", Size: "1Gi"},
-		InitDB:       InitDB{ConfigMapName: "provider-initdb"},
+		Namespace:          "test",
+		ProviderName:       "provider",
+		ServiceAccountName: "provider-postgres",
+		Service:            Service{Name: "provider"},
+		PVC:                PVC{Name: "provider", Size: "1Gi"},
+		InitDB:             InitDB{ConfigMapName: "provider-initdb"},
 		Postgres: Postgres{
 			Image:           "registry.redhat.io/rhel9/postgresql-16",
 			Replicas:        InternalPostgresReplicaCount,

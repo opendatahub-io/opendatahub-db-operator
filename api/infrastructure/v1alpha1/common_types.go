@@ -60,11 +60,10 @@ const (
 )
 
 // ProviderRef selects a DatabaseProvider by exact name or by a label
-// selector matched against DatabaseProvider capability labels -- mutually
-// exclusive, enforced by the CEL rule below (mirrors PVC.spec.storageClassName
-// vs PVC.spec.selector, docs/plan.md §1).
+// selector matched against DatabaseProvider capability labels. Name and
+// selector are mutually exclusive when set, enforced by the CEL rule below.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.name) ? 1 : 0) + (has(self.selector) ? 1 : 0) == 1",message="exactly one of name or selector must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.name) ? 1 : 0) + (has(self.selector) ? 1 : 0) <= 1",message="name and selector cannot both be set"
 type ProviderRef struct {
 	// Name is the exact DatabaseProvider name to bind to.
 	// +optional
@@ -88,8 +87,9 @@ type ProviderRef struct {
 // it sets Provisioned: True, never partially.
 type ConnectionStatus struct {
 	// SecretRef names the credentials Secret in the claim's own namespace.
-	// When spec.secretName is set, it matches that value; otherwise it falls
-	// back to the claim's own metadata.name.
+	// When spec.secretName is set, it matches that value; otherwise it is the
+	// claim-kind default (bare claim name for DatabaseClaim, "sc-"+name for
+	// SchemaClaim).
 	// +kubebuilder:validation:Required
 	SecretRef corev1.LocalObjectReference `json:"secretRef"`
 

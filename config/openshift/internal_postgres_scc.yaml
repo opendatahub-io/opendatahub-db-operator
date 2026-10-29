@@ -1,0 +1,47 @@
+# Shared SCC for Internal Postgres (RHEL postgresql UID/GID 26).
+# Created at install time so the running operator does not need SCC create.
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: odh-db-internal-postgres
+  labels:
+    app.kubernetes.io/name: odh-db-internal-postgres
+    app.kubernetes.io/part-of: opendatahub-db-operator
+    app.kubernetes.io/component: internal-postgres-scc
+    db.infrastructure.opendatahub.io/internal-postgres-scc: owned
+allowPrivilegedContainer: false
+allowHostDirVolumePlugin: false
+allowHostNetwork: false
+allowHostPorts: false
+allowHostPID: false
+allowHostIPC: false
+readOnlyRootFilesystem: false
+allowPrivilegeEscalation: false
+requiredDropCapabilities:
+- ALL
+allowedCapabilities: null
+defaultAddCapabilities: null
+volumes:
+- configMap
+- downwardAPI
+- emptyDir
+- persistentVolumeClaim
+- projected
+- secret
+seLinuxContext:
+  type: MustRunAs
+runAsUser:
+  type: MustRunAs
+  uid: 26
+supplementalGroups:
+  type: MustRunAs
+  ranges:
+  - min: 26
+    max: 26
+fsGroup:
+  type: MustRunAs
+  ranges:
+  - min: 26
+    max: 26
+seccompProfiles:
+- runtime/default

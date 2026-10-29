@@ -22,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -57,7 +58,12 @@ func NewController(cfg *moduleconfig.Config, opts ...Option) *Controller {
 // +kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=databaseproviders/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=schemaclaims;databaseclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;services;configmaps;secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;services;configmaps;secrets;serviceaccounts,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch
+// Install creates the shared SCC and use ClusterRole (Helm / config/openshift).
+// The reconciler only gets/uses the named SCC so RoleBindings can grant use
+// (OpenShift privilege-escalation check) and can fail clearly if install skipped the SCC.
+// +kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=odh-db-internal-postgres,verbs=get;use
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=cert-manager.io,resources=issuers;certificates,verbs=get;list;watch
 
@@ -67,14 +73,14 @@ func NewReconciler(ctx context.Context, mgr ctrl.Manager, cfg *moduleconfig.Conf
 	// Secret watches belong with RHOAIENG-96275's scoped cache; registering
 	// them here would cache Secrets from unrelated namespaces.
 	//
-	// Claim watches enqueue the bound provider so Internal NetworkPolicy
-	// ingress namespaces refresh on Provisioned/bind changes without waiting
+	// Claim watches enqueue the providers a claim event affects so Internal
+	// NetworkPolicy ingress refreshes on claim transitions without waiting
 	// for the provider's periodic requeue (RHOAIENG-96275).
 	claimWatchPreds := reconciler.WithPredicates(predicate.Or(
 		fwpredicates.DefaultPredicate,
 		resourcespredicates.StatusChanged(),
 	))
-	claimToProvider := reconciler.WithEventMapper(dbcontroller.ClaimToProviderMapper())
+	claimToProvider := reconciler.WithEventHandler(dbcontroller.ClaimWatchEventHandler())
 
 	_, err := reconciler.ReconcilerFor(mgr, &infraApi.DatabaseProvider{}).
 		Owns(&appsv1.StatefulSet{}, reconciler.WithPredicates(predicate.Or(
@@ -84,6 +90,8 @@ func NewReconciler(ctx context.Context, mgr ctrl.Manager, cfg *moduleconfig.Conf
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(&infraApi.SchemaClaim{}, claimWatchPreds, claimToProvider).
 		Watches(&infraApi.DatabaseClaim{}, claimWatchPreds, claimToProvider).
