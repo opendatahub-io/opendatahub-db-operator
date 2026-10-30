@@ -16,6 +16,7 @@ resources:
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
+- metrics_reader_role_binding.yaml
 # role.yaml is generated from the DatabaseService controller's RBAC markers; role_binding.yaml grants it to the manager ServiceAccount.
 - role.yaml
 - role_binding.yaml

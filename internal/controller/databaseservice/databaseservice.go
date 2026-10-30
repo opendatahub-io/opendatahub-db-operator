@@ -24,9 +24,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/predicates/dependent"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
@@ -79,10 +81,20 @@ func NewReconciler(
 	m.apiReader = mgr.GetAPIReader()
 
 	_, err := reconciler.ReconcilerFor(mgr, &servicesv1alpha1.DatabaseService{}).
+		// Provider create and status changes re-aggregate the singleton immediately.
+		// The status-aware predicate is required because ResourceVersion changes can
+		// arrive before the cached list used by aggregation has observed the status.
 		Watches(&infraApi.DatabaseProvider{},
 			reconciler.Dynamic(reconciler.CrdExists(gvk.DatabaseProvider)),
-			reconciler.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
-			reconciler.WithEventMapper(dbcontroller.BroadcastListMapper(mgr.GetClient(), &servicesv1alpha1.DatabaseServiceList{}))).
+			reconciler.WithEventMapper(func(_ context.Context, _ client.Object) []reconcile.Request {
+				return []reconcile.Request{{
+					NamespacedName: client.ObjectKey{Name: servicesv1alpha1.DatabaseServiceInstanceName},
+				}}
+			}),
+			reconciler.WithPredicates(predicate.Or(
+				predicate.ResourceVersionChangedPredicate{},
+				dependent.New(dependent.WithWatchStatus(true)),
+			))).
 		Watches(&infraApi.DatabaseClaim{},
 			reconciler.Dynamic(reconciler.CrdExists(gvk.DatabaseClaim)),
 			reconciler.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
@@ -99,6 +111,7 @@ func NewReconciler(
 		WithFinalizer(m.cleanupDefaultProvider).
 		WithAction(m.reportStatus).
 		WithAction(m.ensureDefaultProvider).
+		WithConditions(conditions.Dependent(fwapi.ConditionType(ConditionProviderHealth), conditions.HealthyWhenTrue)).
 		WithConditions(conditions.Dependent(conditionDefaultProviderReady, conditions.HealthyWhenTrue)).
 		Build(ctx)
 

@@ -27,6 +27,7 @@ import (
 	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 	modulemanager "github.com/opendatahub-io/opendatahub-db-operator/pkg/manager"
@@ -93,10 +94,17 @@ func TestDatabaseServiceReconcilesWithoutProviderCRD(t *testing.T) {
 
 		got := &servicesv1alpha1.DatabaseService{}
 		g.Expect(mgr.GetClient().Get(ctx, client.ObjectKeyFromObject(instance), got)).To(Succeed())
-		condition := conditions.FindStatusCondition(got, "DefaultProviderReady")
-		g.Expect(condition).NotTo(BeNil())
-		g.Expect(condition.Status).To(Equal(metav1.ConditionFalse))
-		g.Expect(condition.Reason).To(Equal("ProviderAPIUnavailable"))
+		g.Expect(got.Status.Phase).To(Equal(reconciler.DefaultPhaseNotReady))
+
+		defaultProvider := conditions.FindStatusCondition(got, "DefaultProviderReady")
+		g.Expect(defaultProvider).NotTo(BeNil())
+		g.Expect(defaultProvider.Status).To(Equal(metav1.ConditionFalse))
+		g.Expect(defaultProvider.Reason).To(Equal("ProviderAPIUnavailable"))
+
+		version := conditions.FindStatusCondition(got, "ServerVersion")
+		g.Expect(version).NotTo(BeNil())
+		g.Expect(version.Status).To(Equal(metav1.ConditionUnknown))
+		g.Expect(version.Reason).To(Equal("DatabaseProviderCRDMissing"))
 	}, 30*time.Second).Should(Succeed())
 
 	g.Expect(mgr.GetClient().Delete(ctx, instance)).To(Succeed())

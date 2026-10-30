@@ -24,9 +24,10 @@ limitations under the License.
 package gvk
 
 import (
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	fwgvk "github.com/opendatahub-io/odh-platform-utilities/framework/cluster/gvk"
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Generic Kubernetes GVKs reused from the platform's cluster-scoped GVK
@@ -37,6 +38,8 @@ var (
 	Deployment                     = fwgvk.Deployment
 	ServiceAccount                 = fwgvk.ServiceAccount
 	ConfigMap                      = fwgvk.ConfigMap
+	Service                        = fwgvk.Service
+	ClusterRole                    = fwgvk.ClusterRole
 	ClusterRoleBinding             = fwgvk.ClusterRoleBinding
 	RoleBinding                    = fwgvk.RoleBinding
 	MutatingWebhookConfiguration   = fwgvk.MutatingWebhookConfiguration
@@ -44,6 +47,9 @@ var (
 	CertManagerIssuer              = fwgvk.CertManagerIssuer
 	CertManagerCertificate         = fwgvk.CertManagerCertificate
 	Secret                         = fwgvk.Secret
+	ServiceMonitor                 = schema.GroupVersionKind{
+		Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor",
+	}
 )
 
 var (

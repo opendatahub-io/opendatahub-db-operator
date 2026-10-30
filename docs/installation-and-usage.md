@@ -106,6 +106,12 @@ The SCC template is included when the cluster advertises `security.openshift.io/
 chart render, which does not populate Helm Capabilities). On Kind or vanilla Kubernetes
 the SCC is omitted. For a Kustomize OpenShift deploy, also apply `config/openshift`.
 
+The ServiceMonitor and its service-ca resources follow the same platform boundary. Standalone
+Helm renders them when the cluster advertises `security.openshift.io/v1`; the ODH operator's
+offline render must set `openshift.serviceCA=true`. Set
+`monitoring.serviceMonitor.collector.serviceAccount.name` and `.namespace` when the scraper
+uses a collector identity other than the chart default.
+
 For an administrator-managed database, configure an External provider with a connection Secret
 instead. See the [provider API](../api/infrastructure/v1alpha1/databaseprovider_types.go)
 for the supported fields.

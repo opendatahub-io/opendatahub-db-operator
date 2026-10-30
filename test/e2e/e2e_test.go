@@ -20,9 +20,11 @@ package e2e
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
 	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
@@ -48,11 +50,12 @@ const (
 	defaultNamespace  = "opendatahub-db-operator-e2e"
 	defaultRelease    = "opendatahub-db-operator-e2e"
 	managerDeployment = "odh-db-operator-operator"
-	managerBinding    = "odh-db-operator-manager-rolebinding"
 	leaderBinding     = "odh-db-operator-leader-election-rolebinding"
 )
 
 func TestMain(m *testing.M) {
+	ctrl.SetLogger(logr.Discard())
+
 	gomegaCfg := support.LoadGomegaConfig()
 	SetDefaultEventuallyTimeout(gomegaCfg.EventuallyTimeout)
 	SetDefaultEventuallyPollingInterval(gomegaCfg.EventuallyPollingInterval)
@@ -110,11 +113,21 @@ func TestHelmInstalledManagerDefaultProviderLifecycle(t *testing.T) {
 	err = kubeClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: serviceAccountName}, serviceAccount)
 	g.Expect(err).To(Succeed(), "chart Deployment ServiceAccount does not exist")
 
-	managerRoleBinding := &rbacv1.ClusterRoleBinding{}
-	g.Expect(kubeClient.Get(ctx, types.NamespacedName{Name: managerBinding}, managerRoleBinding)).To(Succeed(),
-		"chart manager ClusterRoleBinding does not exist")
+	managerRoleBindings := &rbacv1.ClusterRoleBindingList{}
+	g.Expect(kubeClient.List(ctx, managerRoleBindings)).To(Succeed())
+	var managerRoleBinding *rbacv1.ClusterRoleBinding
+	for i := range managerRoleBindings.Items {
+		candidate := &managerRoleBindings.Items[i]
+		if strings.HasSuffix(candidate.Name, "-manager-rolebinding") &&
+			strings.HasSuffix(candidate.RoleRef.Name, "-manager-role") &&
+			hasServiceAccountSubject(candidate.Subjects, namespace, serviceAccountName) {
+			managerRoleBinding = candidate
+			break
+		}
+	}
+	g.Expect(managerRoleBinding).NotTo(BeNil(),
+		"chart manager ClusterRoleBinding does not exist for the Deployment ServiceAccount")
 	g.Expect(managerRoleBinding.RoleRef.Kind).To(Equal("ClusterRole"))
-	g.Expect(managerRoleBinding.RoleRef.Name).To(Equal("odh-db-operator-manager-role"))
 	g.Expect(hasServiceAccountSubject(managerRoleBinding.Subjects, namespace, serviceAccountName)).To(BeTrue(),
 		"chart manager ClusterRoleBinding does not grant permissions to the Deployment ServiceAccount")
 

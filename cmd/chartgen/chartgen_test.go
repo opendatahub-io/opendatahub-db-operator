@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
+	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
 )
 
 const deploymentAndRoleBindingManifest = `
@@ -778,6 +779,142 @@ func TestRun_LeavesNoPublishingArtifactsBehind(t *testing.T) {
 	for _, e := range entries {
 		g.Expect(e.Name()).NotTo(HavePrefix("."), "leftover staging/backup artifact: %s", e.Name())
 	}
+}
+
+func TestRun_GatesServiceMonitor(t *testing.T) {
+	g := NewWithT(t)
+
+	outputDir := t.TempDir()
+	manifest := deploymentOnlyManifest + `
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: metrics-monitor
+spec:
+  endpoints:
+  - tlsConfig:
+      serverName: metrics-service.odh-db-operator-system.svc
+`
+	g.Expect(run(strings.NewReader(manifest), outputDir, "test", "0.1.0")).To(Succeed())
+
+	data, err := os.ReadFile(filepath.Join(outputDir, templatesDirName, "monitoring.coreos.com_v1_servicemonitor.yaml"))
+	g.Expect(err).NotTo(HaveOccurred())
+
+	rendered := string(data)
+	g.Expect(rendered).To(HavePrefix(
+		`{{- if and .Values.monitoring.serviceMonitor.enabled ` +
+			`(or .Values.openshift.serviceCA (.Capabilities.APIVersions.Has "security.openshift.io/v1")) }}`,
+	))
+	g.Expect(rendered).To(HaveSuffix("{{- end }}"))
+	g.Expect(rendered).To(ContainSubstring("serverName: metrics-service.{{ .Release.Namespace }}.svc"))
+}
+
+func TestRun_ReleaseScopesClusterRBACAndConfiguresCollector(t *testing.T) {
+	g := NewWithT(t)
+
+	outputDir := t.TempDir()
+	manifest := deploymentOnlyManifest + "\n---\n" + `
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: odh-db-operator-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: odh-db-internal-postgres
+rules:
+- apiGroups:
+  - security.openshift.io
+  resources:
+  - securitycontextconstraints
+  resourceNames:
+  - odh-db-internal-postgres
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: odh-db-operator-metrics-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: odh-db-operator-metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: data-science-collector-collector
+  namespace: opendatahub
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: odh-db-operator-internal-provider-writer
+  namespace: system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: odh-db-operator-internal-provider-writer
+subjects:
+- kind: ServiceAccount
+  name: operator
+  namespace: system
+`
+	g.Expect(run(strings.NewReader(manifest), outputDir, "test", "0.1.0")).To(Succeed())
+
+	roleData, err := os.ReadFile(filepath.Join(
+		outputDir,
+		templatesDirName,
+		"rbac.authorization.k8s.io_v1_clusterrole.yaml",
+	))
+	g.Expect(err).NotTo(HaveOccurred())
+	role := strings.Join(strings.Fields(string(roleData)), " ")
+	metricsReaderRoleName := `name: '{{ include "chart.clusterResourceName" ` +
+		`(dict "root" . "suffix" "metrics-reader") }}'`
+	g.Expect(role).To(ContainSubstring(metricsReaderRoleName))
+	g.Expect(role).To(ContainSubstring("name: " + dbcontroller.InternalPostgresSCCClusterRoleName + " rules:"))
+	g.Expect(role).NotTo(ContainSubstring(`(dict "root" . "suffix" "odh-db-internal-postgres")`))
+
+	bindingData, err := os.ReadFile(filepath.Join(
+		outputDir,
+		templatesDirName,
+		"rbac.authorization.k8s.io_v1_clusterrolebinding.yaml",
+	))
+	g.Expect(err).NotTo(HaveOccurred())
+	binding := strings.Join(strings.Fields(string(bindingData)), " ")
+	metricsReaderBindingName := `name: '{{ include "chart.clusterResourceName" ` +
+		`(dict "root" . "suffix" "metrics-reader-binding") }}'`
+	g.Expect(binding).To(ContainSubstring(metricsReaderBindingName))
+	g.Expect(binding).To(ContainSubstring(metricsReaderRoleName))
+
+	roleBindingData, err := os.ReadFile(filepath.Join(
+		outputDir,
+		templatesDirName,
+		"rbac.authorization.k8s.io_v1_rolebinding.yaml",
+	))
+	g.Expect(err).NotTo(HaveOccurred())
+	roleBinding := strings.Join(strings.Fields(string(roleBindingData)), " ")
+	internalWriterRoleName := `kind: ClusterRole name: '{{ include "chart.clusterResourceName" ` +
+		`(dict "root" . "suffix" "internal-provider-writer") }}'`
+	g.Expect(roleBinding).To(ContainSubstring(internalWriterRoleName))
+
+	g.Expect(binding).To(ContainSubstring(`name: '{{ .Values.monitoring.serviceMonitor.collector.serviceAccount.name }}'`))
+	g.Expect(binding).To(ContainSubstring(
+		`namespace: '{{ .Values.monitoring.serviceMonitor.collector.serviceAccount.namespace`,
+	))
+
+	helperData, err := os.ReadFile(filepath.Join(outputDir, templatesDirName, "_helpers.tpl"))
+	g.Expect(err).NotTo(HaveOccurred())
+	helper := string(helperData)
+	g.Expect(helper).To(ContainSubstring(`define "chart.clusterResourceName"`))
+	g.Expect(helper).To(ContainSubstring(`sha256sum $identity | trunc 12`))
+	g.Expect(helper).To(ContainSubstring(`int (sub 63 (add 14 (len $suffix)))`))
 }
 
 // Simulates a process killed exactly between publishPath's two renames: the

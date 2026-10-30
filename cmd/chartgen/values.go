@@ -32,12 +32,14 @@ import (
 )
 
 const (
-	defaultImageRef        = "controller:latest"
-	defaultImagePullPolicy = "Always"
-	defaultLimitsCPU       = "500m"
-	defaultLimitsMemory    = "128Mi"
-	defaultRequestsCPU     = "10m"
-	defaultRequestsMemory  = "64Mi"
+	defaultImageRef           = "controller:latest"
+	defaultImagePullPolicy    = "Always"
+	defaultLimitsCPU          = "500m"
+	defaultLimitsMemory       = "128Mi"
+	defaultRequestsCPU        = "10m"
+	defaultRequestsMemory     = "64Mi"
+	defaultCollectorName      = "data-science-collector-collector"
+	defaultCollectorNamespace = "opendatahub"
 
 	resourceKeyLimits   = "limits"
 	resourceKeyRequests = "requests"
@@ -67,6 +69,9 @@ type Values struct {
 	// ImagePullSecrets configures pod image pull secrets.
 	ImagePullSecrets []ImagePullSecretRef `json:"imagePullSecrets"`
 
+	// Monitoring configures optional integration with the platform's monitoring stack.
+	Monitoring MonitoringSpec `json:"monitoring"`
+
 	// Platform values are written explicitly into the controller ConfigMap.
 	Platform PlatformSpec `json:"platform"`
 
@@ -85,6 +90,10 @@ type OpenShiftSpec struct {
 	// SecurityContextConstraints installs the shared Internal Postgres SCC
 	// and is also implied when Capabilities includes security.openshift.io/v1.
 	SecurityContextConstraints bool `json:"securityContextConstraints"`
+
+	// ServiceCA enables resources that depend on OpenShift service-ca. It is
+	// also implied when Capabilities includes security.openshift.io/v1.
+	ServiceCA bool `json:"serviceCA"`
 }
 
 // OperatorSpec configures the operator Deployment.
@@ -137,6 +146,24 @@ type ImagePullSecretRef struct {
 	Name string `json:"name"`
 }
 
+type MonitoringSpec struct {
+	ServiceMonitor ServiceMonitorSpec `json:"serviceMonitor"`
+}
+
+type ServiceMonitorSpec struct {
+	Enabled   bool          `json:"enabled" jsonschema:"default=true"`
+	Collector CollectorSpec `json:"collector"`
+}
+
+type CollectorSpec struct {
+	ServiceAccount CollectorServiceAccountSpec `json:"serviceAccount"`
+}
+
+type CollectorServiceAccountSpec struct {
+	Name      string `json:"name" jsonschema:"default=data-science-collector-collector"`
+	Namespace string `json:"namespace" jsonschema:"default=opendatahub"`
+}
+
 // DefaultValues returns a Values instance with sensible defaults.
 func DefaultValues() Values {
 	return Values{
@@ -164,12 +191,24 @@ func DefaultValues() Values {
 			Annotations: map[string]string{},
 		},
 		ImagePullSecrets: []ImagePullSecretRef{},
+		Monitoring: MonitoringSpec{
+			ServiceMonitor: ServiceMonitorSpec{
+				Enabled: true,
+				Collector: CollectorSpec{
+					ServiceAccount: CollectorServiceAccountSpec{
+						Name:      defaultCollectorName,
+						Namespace: defaultCollectorNamespace,
+					},
+				},
+			},
+		},
 		Platform: PlatformSpec{
 			Type:    "OpenDataHub",
 			Version: "",
 		},
 		OpenShift: OpenShiftSpec{
 			SecurityContextConstraints: false,
+			ServiceCA:                  false,
 		},
 		Config: map[string]string{},
 	}

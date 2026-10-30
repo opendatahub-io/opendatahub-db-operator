@@ -21,12 +21,15 @@ import (
 	"errors"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
+	odhtypes "github.com/opendatahub-io/odh-platform-utilities/framework/controller/types"
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
+	dbmetrics "github.com/opendatahub-io/opendatahub-db-operator/pkg/metrics"
 	"github.com/opendatahub-io/opendatahub-db-operator/pkg/postgres"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -104,6 +107,16 @@ func externalFailureReason(err error) string {
 
 func providerConnectionStatus(cfg postgres.Config) infraApi.ProviderConnectionStatus {
 	return infraApi.ProviderConnectionStatus{Host: cfg.Host, Port: int32(cfg.Port), Database: cfg.DBName}
+}
+
+func markReachable(
+	rr *odhtypes.ReconciliationRequest,
+	provider *infraApi.DatabaseProvider,
+	status metav1.ConditionStatus,
+	opts ...conditions.Option,
+) {
+	rr.Conditions.Mark(ConditionReachable, status, opts...)
+	dbmetrics.SetProviderReachable(provider.Name, status == metav1.ConditionTrue)
 }
 
 const (

@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	configv1 "github.com/openshift/api/config/v1"
@@ -104,14 +105,21 @@ func New(
 		})
 	}
 
+	metricsCertificate := newLazyMetricsCertificate(ctx, metricsCertificateDir)
 	mgr, err := ctrl.NewManager(kubeConfig, ctrl.Options{
 		Scheme:        scheme,
 		Cache:         SecretScopedCache(),
 		NewClient:     NewClientWithUncachedSecrets,
 		WebhookServer: webhookServer,
 		Metrics: metricsserver.Options{
-			BindAddress:    cfg.Controller.Metrics.BindAddress,
-			SecureServing:  true,
+			BindAddress:   cfg.Controller.Metrics.BindAddress,
+			SecureServing: true,
+			CertDir:       metricsCertificateDir,
+			TLSOpts: []func(*tls.Config){
+				func(options *tls.Config) {
+					options.GetCertificate = metricsCertificate.GetCertificate
+				},
+			},
 			FilterProvider: filters.WithAuthenticationAndAuthorization,
 		},
 		HealthProbeBindAddress:        cfg.Controller.Health.BindAddress,
