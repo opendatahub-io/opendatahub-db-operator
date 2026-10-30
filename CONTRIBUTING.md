@@ -27,7 +27,22 @@ envtest packages and needs their environments.
 | End to end | `make test-e2e-providers` | Internal and External provider claim lifecycles on Kind. | Existing isolated Kind cluster, Kind, Helm, and Podman CLIs; the cert-manager profile and External provider administrator Secret described below. |
 
 The [CI workflow](.github/workflows/ci.yaml) runs unit and envtest suites. The separate
-[E2E workflow](.github/workflows/e2e.yaml) runs both cert-manager profiles. Run the integration
+[E2E workflow](.github/workflows/e2e.yaml) runs both cert-manager profiles.
+
+The e2e suite includes a default-deny baseline scenario
+(`TestOperatorRunsUnderDefaultDenyBaseline`) that isolates the operator
+namespace with a deny-all NetworkPolicy and verifies the operator keeps
+reaching the API server and PostgreSQL. Its chart-shape assertions run on
+every cluster; the deny-all phase requires a CNI that enforces NetworkPolicy
+(OpenShift/OVN-K, or Calico/Cilium on Kind) and is gated by a runtime
+enforcement probe rather than a flag, so it runs automatically wherever it
+can be meaningful and skips with a documented reason on clusters whose CNI
+ignores policies (Kind's default kindnet). It is a required validation for
+changes touching the operator NetworkPolicy or chart networking; run it with:
+
+```sh
+make test-e2e-providers KIND_CLUSTER=<enforcing-cluster>
+``` Run the integration
 suite yourself when a change touches its cluster boundary.
 
 Before a cluster-backed suite, check `kubectl config current-context`. `make test-integration`
