@@ -652,7 +652,10 @@ func releaseScopedName(name string) string {
 }
 
 func transformClusterRole(obj *unstructured.Unstructured) (string, error) {
-	obj.SetName(releaseScopedName(obj.GetName()))
+	name := obj.GetName()
+	if strings.HasPrefix(name, "odh-db-operator-") {
+		obj.SetName(releaseScopedName(name))
+	}
 	return transformGeneric(obj)
 }
 

@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
+	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
 )
 
 const deploymentAndRoleBindingManifest = `
@@ -825,6 +826,20 @@ rules:
   - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: odh-db-internal-postgres
+rules:
+- apiGroups:
+  - security.openshift.io
+  resources:
+  - securitycontextconstraints
+  resourceNames:
+  - odh-db-internal-postgres
+  verbs:
+  - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: odh-db-operator-metrics-reader-binding
@@ -863,6 +878,8 @@ subjects:
 	metricsReaderRoleName := `name: '{{ include "chart.clusterResourceName" ` +
 		`(dict "root" . "suffix" "metrics-reader") }}'`
 	g.Expect(role).To(ContainSubstring(metricsReaderRoleName))
+	g.Expect(role).To(ContainSubstring("name: " + dbcontroller.InternalPostgresSCCClusterRoleName + " rules:"))
+	g.Expect(role).NotTo(ContainSubstring(`(dict "root" . "suffix" "odh-db-internal-postgres")`))
 
 	bindingData, err := os.ReadFile(filepath.Join(
 		outputDir,

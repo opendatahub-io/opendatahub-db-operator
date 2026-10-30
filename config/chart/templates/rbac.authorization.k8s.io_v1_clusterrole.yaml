@@ -262,8 +262,7 @@ metadata:
     app.kubernetes.io/name: odh-db-internal-postgres
     app.kubernetes.io/part-of: opendatahub-db-operator
     db.infrastructure.opendatahub.io/internal-postgres-scc: owned
-  name: '{{ include "chart.clusterResourceName" (dict "root" . "suffix" "odh-db-internal-postgres")
-    }}'
+  name: odh-db-internal-postgres
 rules:
 - apiGroups:
   - security.openshift.io
