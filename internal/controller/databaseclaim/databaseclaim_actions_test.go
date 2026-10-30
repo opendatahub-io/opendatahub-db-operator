@@ -161,6 +161,74 @@ func TestProvisionAction_ExtensionNotAvailable(t *testing.T) {
 	g.Expect(pg.execSQLsContainingCreateExtension()).To(BeFalse())
 }
 
+func TestProvisionAction_UnsupportedExtensionNeverOpensPostgres(t *testing.T) {
+	g := NewWithT(t)
+
+	provider := &infraApi.DatabaseProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "sample-external"},
+		Spec: infraApi.DatabaseProviderSpec{
+			Type: infraApi.ProviderTypeExternal,
+			External: &infraApi.ExternalProviderSpec{
+				ConnectionSecretRef: corev1.SecretReference{
+					Namespace: "db-admin",
+					Name:      "external-admin",
+				},
+			},
+		},
+		Status: infraApi.DatabaseProviderStatus{
+			Status: fwapi.Status{
+				Conditions: []fwapi.Condition{{
+					Type:   "Reachable",
+					Status: metav1.ConditionTrue,
+				}},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-admin", Namespace: "db-admin"},
+		Data: map[string][]byte{
+			postgres.SecretKeyHost:     []byte("postgres.db-admin.svc"),
+			postgres.SecretKeyPort:     []byte("5432"),
+			postgres.SecretKeyUser:     []byte("postgres"),
+			postgres.SecretKeyPassword: []byte("secret"),
+			postgres.SecretKeyDatabase: []byte("postgres"),
+		},
+	}
+	claim := &infraApi.DatabaseClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "analytics", Namespace: "app"},
+		Spec: infraApi.DatabaseClaimSpec{
+			Provider:   infraApi.ProviderRef{Name: "sample-external"},
+			Database:   "analytics",
+			Extensions: []string{"postgis"},
+		},
+		Status: infraApi.DatabaseClaimStatus{Provider: "sample-external"},
+	}
+	cli := fake.NewClientBuilder().WithScheme(claimTestScheme(t)).WithObjects(provider, secret, claim).Build()
+	factoryCalls := 0
+	m := &Controller{Options: Options{
+		cfg: &moduleconfig.Config{OperatorNamespace: "odh-db-operator-system"},
+		PostgresClientFactory: func(_ context.Context, _ postgres.Config) (postgres.Client, error) {
+			factoryCalls++
+			return nil, fmt.Errorf("factory must not be called for unsupported extensions")
+		},
+	}}
+
+	err := m.provisionAction(context.Background(), claimTestRequest(t, cli, claim))
+	g.Expect(err).To(HaveOccurred())
+	var stop odherrors.StopError
+	g.Expect(errors.As(err, &stop)).To(BeTrue())
+	var unsupported claimerrors.ExtensionNotSupported
+	g.Expect(errors.As(err, &unsupported)).To(BeTrue())
+	g.Expect(unsupported.Extensions).To(Equal([]string{"postgis"}))
+	g.Expect(factoryCalls).To(Equal(0))
+
+	provisioned := conditions.FindStatusCondition(claim, ConditionProvisioned)
+	g.Expect(provisioned).NotTo(BeNil())
+	g.Expect(provisioned.Status).To(Equal(metav1.ConditionFalse))
+	g.Expect(provisioned.Reason).To(Equal("ExtensionNotSupported"))
+	g.Expect(provisioned.Message).To(ContainSubstring(`extension "postgis" is not supported`))
+}
+
 func TestSchemaClaimAPIUnavailable(t *testing.T) {
 	g := NewWithT(t)
 	schemaclaimGVK := schema.GroupVersionKind{

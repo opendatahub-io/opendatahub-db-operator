@@ -29,6 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	odherrors "github.com/opendatahub-io/odh-platform-utilities/framework/controller/actions/errors"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
+	odhtypes "github.com/opendatahub-io/odh-platform-utilities/framework/controller/types"
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
 	"github.com/opendatahub-io/opendatahub-db-operator/pkg/controller/claimerrors"
@@ -157,10 +160,52 @@ func ExternalProviderAllows(
 	return slices.Contains(provider.Spec.External.Capabilities, capability)
 }
 
+// SupportedClaimExtensions is the platform allow-list for claim
+// spec.extensions. EnsureClaimExtensions validates against this list; keep it
+// aligned with claim CRD Enum=vector (see TestSupportedClaimExtensions_MatchClaimCRDEnum).
+var SupportedClaimExtensions = []string{"vector"}
+
+// ValidateClaimExtensions rejects extension names outside
+// SupportedClaimExtensions. Empty or nil input is allowed. Unsupported names
+// are reported in input order via claimerrors.ExtensionNotSupported.
+func ValidateClaimExtensions(extensions []string) error {
+	if len(extensions) == 0 {
+		return nil
+	}
+	supported := make(map[string]struct{}, len(SupportedClaimExtensions))
+	for _, name := range SupportedClaimExtensions {
+		supported[name] = struct{}{}
+	}
+	var unsupported []string
+	for _, name := range extensions {
+		if _, ok := supported[name]; !ok {
+			unsupported = append(unsupported, name)
+		}
+	}
+	if len(unsupported) == 0 {
+		return nil
+	}
+	return claimerrors.ExtensionNotSupported{Extensions: unsupported}
+}
+
+// StopIfUnsupportedClaimExtensions marks Provisioned false when extensions
+// are outside SupportedClaimExtensions and returns a StopError so claim
+// actions never open Postgres. Nil/empty or supported lists return nil.
+func StopIfUnsupportedClaimExtensions(rr *odhtypes.ReconciliationRequest, extensions []string) error {
+	if err := ValidateClaimExtensions(extensions); err != nil {
+		rr.Conditions.Mark(ConditionProvisioned, metav1.ConditionFalse,
+			conditions.WithReason("ExtensionNotSupported"),
+			conditions.WithMessage(err.Error()))
+		return odherrors.NewStopErrorW(err)
+	}
+	return nil
+}
+
 // EnsureClaimExtensions installs claim-required extensions on Internal
 // providers and verifies them against pg_extension in the connected database
 // on External (and any non-Internal) providers. External paths never issue
-// CREATE EXTENSION.
+// CREATE EXTENSION. Names are validated against SupportedClaimExtensions
+// before any Postgres work.
 func EnsureClaimExtensions(
 	ctx context.Context,
 	cli postgres.Client,
@@ -169,6 +214,9 @@ func EnsureClaimExtensions(
 ) error {
 	if len(extensions) == 0 {
 		return nil
+	}
+	if err := ValidateClaimExtensions(extensions); err != nil {
+		return err
 	}
 	if provider == nil {
 		return fmt.Errorf("provider is required for extension verification")

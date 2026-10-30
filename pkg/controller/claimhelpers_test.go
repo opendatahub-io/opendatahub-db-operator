@@ -3,6 +3,9 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/yaml"
 
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	moduleconfig "github.com/opendatahub-io/opendatahub-db-operator/pkg/config"
@@ -147,17 +151,19 @@ func TestEnsureClaimExtensions_ExternalMissingNamedError(t *testing.T) {
 	}
 }
 
-func TestEnsureClaimExtensions_ExternalMultipleMissingReportedTogether(t *testing.T) {
+func TestEnsureClaimExtensions_UnsupportedRejectedBeforePostgres(t *testing.T) {
 	g := NewWithT(t)
 	cli := &recordingClient{installedByName: map[string]bool{"vector": false, "postgis": false}}
 	provider := &infraApi.DatabaseProvider{
-		Spec: infraApi.DatabaseProviderSpec{Type: infraApi.ProviderTypeExternal},
+		Spec: infraApi.DatabaseProviderSpec{Type: infraApi.ProviderTypeInternal},
 	}
 	err := controller.EnsureClaimExtensions(context.Background(), cli, provider, []string{"vector", "postgis"})
-	var missing claimerrors.ExtensionNotAvailable
-	g.Expect(errors.As(err, &missing)).To(BeTrue())
-	g.Expect(missing.Extensions).To(Equal([]string{"vector", "postgis"}))
-	g.Expect(err).To(MatchError(ContainSubstring("vector, postgis")))
+	var unsupported claimerrors.ExtensionNotSupported
+	g.Expect(errors.As(err, &unsupported)).To(BeTrue())
+	g.Expect(unsupported.Extensions).To(Equal([]string{"postgis"}))
+	g.Expect(err).To(MatchError(ContainSubstring(`extension "postgis" is not supported`)))
+	g.Expect(cli.execSQLs).To(BeEmpty())
+	g.Expect(cli.queryRowArgs).To(BeNil())
 }
 
 func TestEnsureClaimExtensions_NilProviderRejected(t *testing.T) {
@@ -167,9 +173,55 @@ func TestEnsureClaimExtensions_NilProviderRejected(t *testing.T) {
 	g.Expect(err).To(MatchError("provider is required for extension verification"))
 }
 
+func TestValidateClaimExtensions_EmptyAndSupported(t *testing.T) {
+	g := NewWithT(t)
+	g.Expect(controller.ValidateClaimExtensions(nil)).To(Succeed())
+	g.Expect(controller.ValidateClaimExtensions([]string{})).To(Succeed())
+	g.Expect(controller.ValidateClaimExtensions([]string{"vector"})).To(Succeed())
+}
+
+func TestValidateClaimExtensions_UnsupportedNamed(t *testing.T) {
+	g := NewWithT(t)
+	err := controller.ValidateClaimExtensions([]string{"postgis"})
+	var unsupported claimerrors.ExtensionNotSupported
+	g.Expect(errors.As(err, &unsupported)).To(BeTrue())
+	g.Expect(unsupported.Extensions).To(Equal([]string{"postgis"}))
+	g.Expect(err).To(MatchError(`extension "postgis" is not supported`))
+}
+
+func TestValidateClaimExtensions_MixedReportsOnlyUnsupported(t *testing.T) {
+	g := NewWithT(t)
+	err := controller.ValidateClaimExtensions([]string{"vector", "postgis", "uuid-ossp"})
+	var unsupported claimerrors.ExtensionNotSupported
+	g.Expect(errors.As(err, &unsupported)).To(BeTrue())
+	g.Expect(unsupported.Extensions).To(Equal([]string{"postgis", "uuid-ossp"}))
+	g.Expect(err).To(MatchError(ContainSubstring("postgis, uuid-ossp")))
+}
+
+func TestSupportedClaimExtensions_MatchClaimCRDEnum(t *testing.T) {
+	g := NewWithT(t)
+	_, thisFile, _, ok := runtime.Caller(0)
+	g.Expect(ok).To(BeTrue())
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "../.."))
+
+	for _, crdFile := range []string{
+		"infrastructure.opendatahub.io_databaseclaims.yaml",
+		"infrastructure.opendatahub.io_schemaclaims.yaml",
+	} {
+		path := filepath.Join(repoRoot, "config/crd/bases", crdFile)
+		raw, err := os.ReadFile(path)
+		g.Expect(err).NotTo(HaveOccurred(), path)
+		var doc map[string]any
+		g.Expect(yaml.Unmarshal(raw, &doc)).To(Succeed(), path)
+		enum := claimExtensionsEnum(g, doc)
+		g.Expect(enum).To(Equal(controller.SupportedClaimExtensions), path)
+	}
+}
+
 type recordingClient struct {
 	installedByName map[string]bool
 	execSQLs        []string
+	queryRowArgs    []any
 }
 
 func (c *recordingClient) Config() postgres.Config { return postgres.Config{} }
@@ -185,6 +237,7 @@ func (c *recordingClient) Query(context.Context, string, ...any) (pgx.Rows, erro
 	return nil, nil
 }
 func (c *recordingClient) QueryRow(_ context.Context, _ string, args ...any) (pgx.Row, error) {
+	c.queryRowArgs = append(c.queryRowArgs, args...)
 	if len(args) > 0 {
 		if names, ok := args[0].([]string); ok {
 			var installed []string
@@ -203,6 +256,40 @@ func (c *recordingClient) QueryRow(_ context.Context, _ string, args ...any) (pg
 		}
 	}
 	return recordingBoolRow{installed: installed}, nil
+}
+
+func claimExtensionsEnum(g Gomega, doc map[string]any) []string {
+	g.Expect(doc).To(HaveKey("spec"))
+	spec, ok := doc["spec"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	versions, ok := spec["versions"].([]any)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(versions).NotTo(BeEmpty())
+	version, ok := versions[0].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	schema, ok := version["schema"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	openAPI, ok := schema["openAPIV3Schema"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	props, ok := openAPI["properties"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	specProp, ok := props["spec"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	specProps, ok := specProp["properties"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	extensions, ok := specProps["extensions"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	items, ok := extensions["items"].(map[string]any)
+	g.Expect(ok).To(BeTrue())
+	rawEnum, ok := items["enum"].([]any)
+	g.Expect(ok).To(BeTrue())
+	enum := make([]string, 0, len(rawEnum))
+	for _, v := range rawEnum {
+		s, ok := v.(string)
+		g.Expect(ok).To(BeTrue())
+		enum = append(enum, s)
+	}
+	return enum
 }
 
 type recordingBoolRow struct {

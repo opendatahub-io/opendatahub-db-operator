@@ -100,3 +100,23 @@ func (e ExtensionNotAvailable) Error() string {
 		)
 	}
 }
+
+// ExtensionNotSupported is returned when a claim names PostgreSQL extensions
+// outside the platform SupportedClaimExtensions allow-list.
+type ExtensionNotSupported struct {
+	Extensions []string
+}
+
+func (e ExtensionNotSupported) Error() string {
+	switch len(e.Extensions) {
+	case 0:
+		return "required extensions are not supported"
+	case 1:
+		return fmt.Sprintf("extension %q is not supported", e.Extensions[0])
+	default:
+		return fmt.Sprintf(
+			"extensions [%s] are not supported",
+			strings.Join(e.Extensions, ", "),
+		)
+	}
+}

@@ -77,6 +77,10 @@ func (m *Controller) provisionAction(ctx context.Context, rr *odhtypes.Reconcili
 			WithRequeueAfter(providerBindingRequeueAfter)
 	}
 
+	if err := dbcontroller.StopIfUnsupportedClaimExtensions(rr, obj.Spec.Extensions); err != nil {
+		return err
+	}
+
 	if !dbcontroller.ProviderReachable(provider.GetConditions()) {
 		rr.Conditions.Mark(ConditionProvisioned, metav1.ConditionFalse,
 			conditions.WithReason("ProviderNotReady"),
