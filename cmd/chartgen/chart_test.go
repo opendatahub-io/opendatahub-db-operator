@@ -312,6 +312,34 @@ spec:
 		"a Deployment without a webhook-server port must yield 0, leaving NetworkPolicy ports literal")
 }
 
+func TestOperatorWebhookContainerPort_SidecarFirstIsIgnored(t *testing.T) {
+	g := NewWithT(t)
+
+	// A sidecar declaring its own webhook-server port, listed BEFORE the
+	// manager: the extraction must still return the manager's port, matching
+	// the container the Deployment transform templates.
+	deployment := unstructuredFromYAML(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager
+spec:
+  template:
+    spec:
+      containers:
+      - name: kube-auth-proxy
+        ports:
+        - name: webhook-server
+          containerPort: 9444
+      - name: manager
+        ports:
+        - name: webhook-server
+          containerPort: 9443
+`)
+	g.Expect(operatorWebhookContainerPort(&deployment)).To(Equal(int64(9443)),
+		"only the manager container's webhook-server port may be extracted")
+}
+
 func TestTransformRoleBinding_IgnoresSameNameDifferentNamespace(t *testing.T) {
 	g := NewWithT(t)
 

@@ -1066,10 +1066,19 @@ func transformNetworkPolicy(
 			return "", fmt.Errorf("networkpolicy %s: stamping webhook port: %w", obj.GetName(), err)
 		}
 	}
-	if stamped {
-		if err := unstructured.SetNestedSlice(obj.Object, ingress, "spec", "ingress"); err != nil {
-			return "", fmt.Errorf("networkpolicy %s: stamping webhook port: %w", obj.GetName(), err)
-		}
+	if !stamped {
+		// The operator Deployment declares a webhook port but this policy,
+		// which selects the operator pod, admits no ingress on it. Emitting
+		// the policy with literal ports would silently reintroduce the
+		// listener/allowance desync this transform exists to prevent, so
+		// fail generation and make the mismatch explicit.
+		return "", fmt.Errorf(
+			"networkpolicy %s: no ingress rule admits the operator webhook port %d; "+
+				"update the policy in config/default to match the Deployment's %q port",
+			obj.GetName(), operatorWebhookPort, webhookServerPortName)
+	}
+	if err := unstructured.SetNestedSlice(obj.Object, ingress, "spec", "ingress"); err != nil {
+		return "", fmt.Errorf("networkpolicy %s: stamping webhook port: %w", obj.GetName(), err)
 	}
 
 	raw, err := marshalResource(obj)

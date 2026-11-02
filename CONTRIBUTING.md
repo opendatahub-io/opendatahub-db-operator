@@ -38,12 +38,19 @@ every cluster; the deny-all phase requires a CNI that enforces NetworkPolicy
 enforcement probe rather than a flag, so it runs automatically wherever it
 can be meaningful and skips with a documented reason on clusters whose CNI
 ignores policies (Kind's default kindnet). It is a required validation for
-changes touching the operator NetworkPolicy or chart networking; run it with:
+changes touching the operator NetworkPolicy or chart networking. Run it
+directly against any cluster whose CNI enforces NetworkPolicy
+(OpenShift/OVN-K, or Kind with Calico/Cilium) with the Helm-installed
+operator -- the `make test-e2e-providers` target is bound to a
+`kind-<cluster>` context and cannot express this:
 
 ```sh
-make test-e2e-providers KIND_CLUSTER=<enforcing-cluster>
-``` Run the integration
-suite yourself when a change touches its cluster boundary.
+ODH_E2E_NAMESPACE=<operator-namespace> \
+ODH_E2E_CONSUMER_IMAGE=<bash-and-psql image, e.g. postgres:16> \
+go test ./test/e2e/ -run TestOperatorRunsUnderDefaultDenyBaseline -v -timeout 25m
+```
+
+Run the integration suite yourself when a change touches its cluster boundary.
 
 Before a cluster-backed suite, check `kubectl config current-context`. `make test-integration`
 applies CRDs only when the current context matches `TEST_INTEGRATION_CONTEXT` (by default,

@@ -138,20 +138,27 @@ func TestOperatorRunsUnderDefaultDenyBaseline(t *testing.T) {
 	g.Eventually(func(g Gomega) {
 		current := &appsv1.Deployment{}
 		g.Expect(cli.Get(ctx, deploymentKey, current)).To(Succeed())
-		// Progressing=True with reason NewReplicaSetAvailable is the
-		// deployment controller's rollout-complete verdict: the restarted
-		// pod is Ready and the pre-restart pod is terminated. Weaker checks
-		// (UpdatedReplicas/ReadyReplicas alone) pass during the rollout
-		// while the pre-restart pod -- whose connections predate the
-		// baseline -- still serves, so everything below must wait for the
-		// cold-started pod to take over.
+		// The controller must have observed the restart generation first:
+		// the Progressing condition and ReadyReplicas left over from the
+		// previous rollout satisfy the checks below before the controller
+		// has seen the update, which would let the pre-restart pod -- whose
+		// connections predate the baseline -- serve every assertion.
+		g.Expect(current.Status.ObservedGeneration).To(BeNumerically(">=", current.Generation),
+			"deployment controller has not observed the restarted generation")
+		// Progressing=True with reason NewReplicaSetAvailable is then the
+		// rollout-complete verdict: the restarted pod is Ready and the
+		// pre-restart pod is terminated.
+		progressing := false
 		for _, condition := range current.Status.Conditions {
 			if condition.Type == appsv1.DeploymentProgressing {
+				progressing = true
 				g.Expect(condition.Status).To(Equal(corev1.ConditionTrue))
 				g.Expect(condition.Reason).To(Equal("NewReplicaSetAvailable"),
 					"rollout must complete before asserting behavior under the baseline")
 			}
 		}
+		g.Expect(progressing).To(BeTrue(), "deployment has no Progressing condition")
+		g.Expect(current.Status.UpdatedReplicas).To(BeNumerically(">=", 1))
 		g.Expect(current.Status.ReadyReplicas).To(BeNumerically(">=", 1),
 			"manager must become Ready under the default-deny baseline (API server unreachable otherwise)")
 	}).WithTimeout(5*time.Minute).Should(Succeed(), "manager did not restart Ready under the baseline")
@@ -366,7 +373,24 @@ exit 1
 	}
 	g.Expect(cli.Create(ctx, denyAll)).To(Succeed())
 
-	// Under deny-all the same connection must now fail. If it still
-	// succeeds, the CNI does not enforce NetworkPolicy.
-	return !connect("np-probe-deny", 2)
+	// Under deny-all the same connection must now fail. CNI policy
+	// programming is asynchronous, so a single succeeding attempt is not
+	// evidence of non-enforcement -- retry for a window and treat the FIRST
+	// blocked connection as proof of enforcement. Only sustained success
+	// means the CNI ignores policies.
+	// Each attempt needs its own pod: completed pods are not removed, so
+	// reusing one name makes the next Create fail with AlreadyExists --
+	// exactly the converging-policy race this window exists to absorb.
+	attempt := 0
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		attempt++
+		if !connect(fmt.Sprintf("np-probe-deny-%d", attempt), 1) {
+			return true
+		}
+		// Connected: either the policy is not yet programmed or the CNI
+		// does not enforce. Keep trying until the window closes.
+		time.Sleep(2 * time.Second)
+	}
+	return false
 }

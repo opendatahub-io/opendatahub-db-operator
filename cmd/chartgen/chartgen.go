@@ -117,38 +117,38 @@ func operatorPodTemplateLabels(deployment *unstructured.Unstructured) map[string
 	return labels
 }
 
-// operatorWebhookContainerPort returns the containerPort of the first port
-// named webhook-server in the operator Deployment, or 0 when it has none.
-// The NetworkPolicy transform aligns its ingress port to this value, so the
-// admitted port is derived from what the Deployment actually declares
-// instead of a hardcoded default -- a kustomize-side port change cannot
-// desync the policy from the listener.
+// operatorWebhookContainerPort returns the containerPort of the port named
+// webhook-server on the manager container, or 0 when it has none. Only the
+// manager container is consulted -- the same container the Deployment
+// transform templates -- so a sidecar declaring its own webhook-server port
+// cannot shift the value. The NetworkPolicy transform aligns its ingress
+// port to this value, so the admitted port is derived from what the
+// Deployment actually declares instead of a hardcoded default -- a
+// kustomize-side port change cannot desync the policy from the listener.
 func operatorWebhookContainerPort(deployment *unstructured.Unstructured) int64 {
 	containers, found, err := unstructured.NestedSlice(
 		deployment.Object, "spec", "template", "spec", "containers")
 	if err != nil || !found {
 		return 0
 	}
-	for _, item := range containers {
-		container, ok := item.(map[string]any)
-		if !ok {
+	manager, ok := findManagerContainer(containers)
+	if !ok {
+		return 0
+	}
+	ports, found, err := unstructured.NestedSlice(manager, "ports")
+	if err != nil || !found {
+		return 0
+	}
+	for _, portItem := range ports {
+		port, ok := portItem.(map[string]any)
+		if !ok || port["name"] != webhookServerPortName {
 			continue
 		}
-		ports, found, err := unstructured.NestedSlice(container, "ports")
-		if err != nil || !found {
-			continue
-		}
-		for _, portItem := range ports {
-			port, ok := portItem.(map[string]any)
-			if !ok || port["name"] != webhookServerPortName {
-				continue
-			}
-			switch value := port["containerPort"].(type) {
-			case int64:
-				return value
-			case float64:
-				return int64(value)
-			}
+		switch value := port["containerPort"].(type) {
+		case int64:
+			return value
+		case float64:
+			return int64(value)
 		}
 	}
 	return 0
