@@ -309,14 +309,18 @@ func triggerServiceReconcile(
 	t.Helper()
 	g := NewWithT(t)
 
-	g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(service), service)).To(Succeed())
-	annotations := service.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	annotations["test.opendatahub.io/reconcile"] = t.Name()
-	service.SetAnnotations(annotations)
-	g.Expect(cli.Update(ctx, service)).To(Succeed())
+	// The service controller's own status writes race this annotation bump,
+	// so re-read and retry on conflict instead of failing the test.
+	g.Eventually(func(g Gomega) {
+		g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(service), service)).To(Succeed())
+		annotations := service.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations["test.opendatahub.io/reconcile"] = t.Name()
+		service.SetAnnotations(annotations)
+		g.Expect(cli.Update(ctx, service)).To(Succeed())
+	}).WithTimeout(time.Minute).Should(Succeed())
 }
 
 func expectServerVersion(
