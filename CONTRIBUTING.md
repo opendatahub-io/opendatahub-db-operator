@@ -50,6 +50,10 @@ ODH_E2E_CONSUMER_IMAGE=<bash-and-psql image, e.g. postgres:16> \
 go test ./test/e2e/ -run TestOperatorRunsUnderDefaultDenyBaseline -v -timeout 25m
 ```
 
+The E2E workflow's `Default-deny baseline (Calico)` job runs this scenario
+continuously on every pull request, on a Kind cluster whose default CNI is
+replaced with Calico so NetworkPolicy is enforced.
+
 Run the integration suite yourself when a change touches its cluster boundary.
 
 Before a cluster-backed suite, check `kubectl config current-context`. `make test-integration`
