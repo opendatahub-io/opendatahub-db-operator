@@ -14,13 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package operands embeds the module operand manifests for runtime
-// installation. Nothing consumes FS() yet: a follow-up change for
-// RHOAIENG-100934 renders and applies these CRDs, at which point this
-// note goes away. Until then the sync and render tests keep the embedded
-// copies honest. config/crd/bases remains the source of truth: the Makefile
-// manifests target syncs the generated CRDs into the embedded directory,
-// and the sync test fails the build when the copies drift.
+// Package operands embeds the module operand manifests that the
+// DatabaseService reconciler renders and applies at runtime. config/crd/bases
+// remains the source of truth: the Makefile manifests target syncs the
+// generated CRDs into the embedded directory, and the sync test fails the
+// build when the copies drift.
 package operands
 
 import (

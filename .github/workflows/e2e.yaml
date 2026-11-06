@@ -24,6 +24,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CALICO_VERSION: v3.29.5
 
@@ -71,6 +74,7 @@ jobs:
           make test-e2e-providers \
             KIND_CLUSTER="db-operator-e2e-${{ matrix.cert-manager-profile }}" \
             CONTAINER_TOOL=docker \
+            E2E_ALLOW_CRD_DELETE=1 \
             E2E_CERT_MANAGER_PROFILE="${{ matrix.cert-manager-profile }}" \
             E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE=external-postgres \
             E2E_EXTERNAL_ADMIN_SECRET_NAME=external-postgres-admin
@@ -120,9 +124,9 @@ jobs:
 
       - name: Run default-deny baseline scenario
         run: |
-          make test-e2e-setup KIND_CLUSTER=db-operator-e2e-baseline E2E_CERT_MANAGER_PROFILE=present
-          ODH_E2E_NAMESPACE=opendatahub-db-operator-e2e             go test ./test/e2e/ -run TestOperatorRunsUnderDefaultDenyBaseline -v -count=1 -timeout 25m
+          make test-e2e-setup KIND_CLUSTER=db-operator-e2e-baseline E2E_CERT_MANAGER_PROFILE=present E2E_ALLOW_CRD_DELETE=1
+          ODH_E2E_NAMESPACE=opendatahub-db-operator-e2e             go test ./test/e2e/ -run 'TestHelmInstalledManagerDefaultProviderLifecycle|TestOperatorRunsUnderDefaultDenyBaseline' -v -count=1 -timeout 25m
 
       - name: Teardown
         if: always()
-        run: make test-e2e-teardown KIND_CLUSTER=db-operator-e2e-baseline || true
+        run: make test-e2e-teardown KIND_CLUSTER=db-operator-e2e-baseline E2E_ALLOW_CRD_DELETE=1 || true

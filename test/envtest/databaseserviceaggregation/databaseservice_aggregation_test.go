@@ -70,7 +70,12 @@ func TestDatabaseServiceAggregatesProviderStatus(t *testing.T) {
 		Metrics: metricsserver.Options{BindAddress: "0"},
 	})
 	g.Expect(err).NotTo(HaveOccurred())
-	g.Expect(databaseservice.NewReconciler(ctx, mgr, cfg)).To(Succeed())
+	// The aggregation suite exercises status aggregation only; registering
+	// the infrastructure controllers would add unrelated reconcile traffic
+	// to this manager, so the registration option is a no-op.
+	g.Expect(databaseservice.NewReconciler(ctx, mgr, cfg, databaseservice.Options{
+		RegisterInfrastructure: func() error { return nil },
+	})).To(Succeed())
 
 	bootstrapClient, err := client.New(restCfg, client.Options{Scheme: scheme})
 	g.Expect(err).NotTo(HaveOccurred())

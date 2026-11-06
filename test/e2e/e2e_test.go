@@ -38,6 +38,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -152,6 +153,45 @@ func TestHelmInstalledManagerDefaultProviderLifecycle(t *testing.T) {
 		"chart manager and leader-election bindings reference that ServiceAccount",
 		release, namespace, deployment.Name, managerImage, serviceAccountName)
 
+	// Only the DatabaseService CRD is pre-installed by the e2e setup; the
+	// infrastructure CRDs must be absent until the operator applies them as
+	// module operands once the singleton exists. Under shuffled ordering
+	// another test may have enabled the module first; the absence assertions
+	// then only run when this test is the one enabling it.
+	freshInstall := true
+	for _, name := range []string{
+		infraapi.DatabaseProviderCRDName,
+		infraapi.DatabaseClaimCRDName,
+		infraapi.SchemaClaimCRDName,
+	} {
+		err := kubeClient.Get(ctx, client.ObjectKey{Name: name}, &apiextensionsv1.CustomResourceDefinition{})
+		if err == nil {
+			freshInstall = false
+			continue
+		}
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"getting infrastructure CRD %s: %v; run `make test-e2e-setup`", name, err)
+	}
+	if freshInstall {
+		t.Log("operand CRDs absent before enabling: asserting the operator's fresh-install path")
+	}
+
+	podList := &corev1.PodList{}
+	g.Expect(kubeClient.List(ctx, podList,
+		client.InNamespace(namespace),
+		client.MatchingLabels(deployment.Spec.Selector.MatchLabels))).To(Succeed())
+	g.Expect(podList.Items).To(HaveLen(1), "expected exactly one manager pod before enabling the module")
+	managerPodBefore := podList.Items[0].DeepCopy()
+	managerRestarts := func(pod *corev1.Pod) int32 {
+		for _, status := range pod.Status.ContainerStatuses {
+			if status.Name == "manager" {
+				return status.RestartCount
+			}
+		}
+		return -1
+	}
+	restartsBefore := managerRestarts(managerPodBefore)
+
 	instance := &servicesv1alpha1.DatabaseService{
 		ObjectMeta: metav1.ObjectMeta{Name: servicesv1alpha1.DatabaseServiceInstanceName},
 	}
@@ -176,6 +216,43 @@ func TestHelmInstalledManagerDefaultProviderLifecycle(t *testing.T) {
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "DatabaseService singleton still exists after cleanup: %v", err)
 		}).WithTimeout(3 * time.Minute).WithPolling(500 * time.Millisecond).Should(Succeed())
 	})
+
+	// The operator applies the infrastructure CRDs as module operands and
+	// registers their controllers on the running manager: the CRDs must
+	// appear, become Established, and report readiness without the manager
+	// pod restarting.
+	g.Eventually(func(g Gomega) {
+		for _, name := range []string{
+			infraapi.DatabaseProviderCRDName,
+			infraapi.DatabaseClaimCRDName,
+			infraapi.SchemaClaimCRDName,
+		} {
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			g.Expect(kubeClient.Get(ctx, client.ObjectKey{Name: name}, crd)).To(Succeed(),
+				"operand CRD %s was not applied by the operator (check the manager RBAC)", name)
+			established := false
+			for _, condition := range crd.Status.Conditions {
+				if condition.Type == apiextensionsv1.Established {
+					established = condition.Status == apiextensionsv1.ConditionTrue
+				}
+			}
+			g.Expect(established).To(BeTrue(), "operand CRD %s is not Established", name)
+		}
+		got := &servicesv1alpha1.DatabaseService{}
+		g.Expect(kubeClient.Get(ctx, client.ObjectKeyFromObject(instance), got)).To(Succeed())
+		operandsReady := conditions.FindStatusCondition(got, "OperandsReady")
+		g.Expect(operandsReady).NotTo(BeNil(), "no OperandsReady condition on status.conditions")
+		g.Expect(operandsReady.Status).To(Equal(metav1.ConditionTrue))
+	}).WithTimeout(3*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+		"waiting for the operator to install the operand CRDs")
+
+	managerPodAfter := &corev1.Pod{}
+	g.Expect(kubeClient.Get(ctx,
+		client.ObjectKey{Namespace: namespace, Name: managerPodBefore.Name}, managerPodAfter)).To(Succeed())
+	g.Expect(managerPodAfter.UID).To(Equal(managerPodBefore.UID),
+		"manager pod was replaced during operand installation")
+	g.Expect(managerRestarts(managerPodAfter)).To(Equal(restartsBefore),
+		"manager container restarted during operand installation")
 
 	var reconciled *servicesv1alpha1.DatabaseService
 	g.Eventually(func(g Gomega) {

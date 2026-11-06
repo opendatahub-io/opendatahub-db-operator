@@ -43,7 +43,10 @@ import (
 const baselinePolicyName = "odh-db-operator-e2e-default-deny"
 
 // TestOperatorRunsUnderDefaultDenyBaseline verifies AC2 of RHOAIENG-96275 in
-// two phases.
+// two phases. It is order-independent: it normally follows
+// TestHelmInstalledManagerDefaultProviderLifecycle (file order), but when
+// invoked alone or shuffled first it enables the module itself after the
+// CNI gate so the operand CRDs its providers depend on exist.
 //
 // Phase one (every cluster, every CI run): the chart ships the operator
 // NetworkPolicy with the expected shape -- the allowances that keep the
@@ -94,6 +97,12 @@ func TestOperatorRunsUnderDefaultDenyBaseline(t *testing.T) {
 			"vacuously here. Run on a cluster with an enforcing CNI (OpenShift/OVN-K, " +
 			"Calico, Cilium); see CONTRIBUTING's test-environments section")
 	}
+
+	// The baseline scenario runs with the module enabled: the operand CRDs
+	// its providers depend on are installed by the operator once the
+	// singleton exists. When invoked alone or shuffled first, enable the
+	// module here so this test stays independent of ordering.
+	ensureOperandCRDs(t, ctx, cli)
 
 	// Apply the default-deny baseline: deny all ingress and egress for every
 	// pod in the operator namespace, mirroring what the ODH platform operator
