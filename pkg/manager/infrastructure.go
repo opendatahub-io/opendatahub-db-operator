@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/go-logr/logr"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,96 +36,125 @@ import (
 
 // NewInfrastructureRegistration returns a function that registers the
 // infrastructure controllers (DatabaseProvider, DatabaseClaim, SchemaClaim)
-// on mgr. New invokes it exactly once, at startup, and the once outcome is
-// final: when CRDs are absent at that call, registration is skipped and
-// nil is returned — the pre-existing behavior where installing CRDs later
-// requires a pod restart. A later call therefore cannot register after
-// installation; restart-free registration needs "CRDs absent" treated as
-// retryable rather than a completed no-op, which the follow-up for
-// RHOAIENG-100934 replaces these semantics to deliver. A failed attempt is
-// likewise sticky — the error is returned on every later call instead of
-// being retried — because registration failures are setup errors such as
-// scheme or name conflicts that a retry cannot fix. The guard is per
-// returned function, not per manager.
+// on mgr. Registration is idempotent per controller and safe to call
+// repeatedly, including concurrently and on a running manager: each
+// controller registers at most once, a failed registration is sticky
+// (registration failures are setup errors such as scheme or name conflicts
+// that a retry cannot fix), and CRD absence is retryable — RHOAIENG-99478's
+// operand install path installs the CRDs at runtime and calls registration
+// again once they are established, so no pod restart is required.
 func NewInfrastructureRegistration(
 	ctx context.Context,
 	mgr ctrl.Manager,
 	cfg *moduleconfig.Config,
 ) func() error {
-	return onceGuarded(func() error {
-		return registerInfrastructureControllers(ctx, mgr, cfg)
-	})
-}
-
-// onceGuarded wraps fn so it runs at most once; the outcome of that single
-// attempt is returned on every call.
-func onceGuarded(fn func() error) func() error {
-	var once sync.Once
-	var err error
-	return func() error {
-		once.Do(func() {
-			err = fn()
-		})
-		return err
+	r := &infrastructureRegistration{
+		ctx:    ctx,
+		mgr:    mgr,
+		cfg:    cfg,
+		reader: mgr.GetAPIReader(),
+		log:    ctrl.Log.WithName("manager"),
+		registerProvider: func() error {
+			return databaseprovider.NewReconciler(ctx, mgr, cfg, databaseprovider.Options{
+				Recorder: mgr.GetEventRecorder(infraApi.DatabaseProviderResource),
+			})
+		},
+		registerDatabaseClaims: func() error {
+			return databaseclaim.NewReconciler(ctx, mgr, cfg, databaseclaim.Options{
+				Recorder: mgr.GetEventRecorder(infraApi.DatabaseClaimResource),
+			})
+		},
+		registerSchemaClaims: func() error {
+			return schemaclaim.NewReconciler(ctx, mgr, cfg, schemaclaim.Options{
+				Recorder: mgr.GetEventRecorder(infraApi.SchemaClaimResource),
+			})
+		},
 	}
+	return r.register
 }
 
-// registerInfrastructureControllers registers the DatabaseProvider,
-// DatabaseClaim, and SchemaClaim reconcilers on mgr when their CRDs are
-// present, so the operator can still reconcile the module singleton when
-// infrastructure CRDs are not installed yet.
-func registerInfrastructureControllers(
-	ctx context.Context,
-	mgr ctrl.Manager,
-	cfg *moduleconfig.Config,
-) error {
-	reader := mgr.GetAPIReader()
-	log := ctrl.Log.WithName("manager")
+// infrastructureRegistration registers the infrastructure controllers on
+// one manager. The per-controller registration functions are fields so the
+// guard semantics are testable without a manager.
+type infrastructureRegistration struct {
+	ctx    context.Context
+	mgr    ctrl.Manager
+	cfg    *moduleconfig.Config
+	reader client.Reader
+	log    logr.Logger
 
-	providerCRDAvailable, err := crdAvailable(ctx, reader, infraApi.DatabaseProviderCRDName)
+	registerProvider       func() error
+	registerDatabaseClaims func() error
+	registerSchemaClaims   func() error
+
+	provider       registrationGuard
+	databaseClaims registrationGuard
+	schemaClaims   registrationGuard
+}
+
+// register registers every infrastructure controller whose CRDs are
+// present. CRD absence is not an error: only the boot call and the operand
+// install path (which calls registration once the CRDs are established)
+// can observe absence, and both treat it as "not yet". A controller that
+// has registered — or failed to register — is never touched again.
+func (r *infrastructureRegistration) register() error {
+	providerAvailable, err := crdAvailable(r.ctx, r.reader, infraApi.DatabaseProviderCRDName)
 	if err != nil {
 		return fmt.Errorf("checking DatabaseProvider CRD: %w", err)
 	}
-	if providerCRDAvailable {
-		if err := databaseprovider.NewReconciler(ctx, mgr, cfg, databaseprovider.Options{
-			Recorder: mgr.GetEventRecorder(infraApi.DatabaseProviderResource),
-		}); err != nil {
-			return fmt.Errorf("creating databaseprovider reconciler: %w", err)
-		}
-	} else {
-		log.Info("DatabaseProvider CRD is absent; provider reconciliation requires a restart after CRD installation")
+	if !providerAvailable {
+		// Claim controllers also watch DatabaseProvider, so nothing
+		// registers until the provider CRD exists. On a fresh install the
+		// module installs the operand CRDs and registration follows.
+		r.log.Info("infrastructure CRDs are absent; controllers will register once the module installs them")
+		return nil
+	}
+
+	if err := r.provider.register(r.registerProvider); err != nil {
+		return fmt.Errorf("creating databaseprovider reconciler: %w", err)
 	}
 
 	// Claims watch DatabaseProvider, so both the claim CRD and provider CRD
 	// must be present for each claim reconciler.
-	databaseClaimCRDAvailable, err := crdAvailable(ctx, reader, infraApi.DatabaseClaimCRDName)
-	if err != nil {
+	if available, err := crdAvailable(r.ctx, r.reader, infraApi.DatabaseClaimCRDName); err != nil {
 		return fmt.Errorf("checking DatabaseClaim CRD: %w", err)
-	}
-	if databaseClaimCRDAvailable && providerCRDAvailable {
-		if err := databaseclaim.NewReconciler(ctx, mgr, cfg, databaseclaim.Options{
-			Recorder: mgr.GetEventRecorder(infraApi.DatabaseClaimResource),
-		}); err != nil {
+	} else if available {
+		if err := r.databaseClaims.register(r.registerDatabaseClaims); err != nil {
 			return fmt.Errorf("creating databaseclaim reconciler: %w", err)
 		}
-	} else {
-		log.Info("DatabaseClaim reconciliation skipped; requires claim and provider CRDs (restart after install)")
 	}
-
-	schemaClaimCRDAvailable, err := crdAvailable(ctx, reader, infraApi.SchemaClaimCRDName)
-	if err != nil {
+	if available, err := crdAvailable(r.ctx, r.reader, infraApi.SchemaClaimCRDName); err != nil {
 		return fmt.Errorf("checking SchemaClaim CRD: %w", err)
-	}
-	if schemaClaimCRDAvailable && providerCRDAvailable {
-		if err := schemaclaim.NewReconciler(ctx, mgr, cfg, schemaclaim.Options{
-			Recorder: mgr.GetEventRecorder(infraApi.SchemaClaimResource),
-		}); err != nil {
+	} else if available {
+		if err := r.schemaClaims.register(r.registerSchemaClaims); err != nil {
 			return fmt.Errorf("creating schemaclaim reconciler: %w", err)
 		}
-	} else {
-		log.Info("SchemaClaim reconciliation skipped; requires claim and provider CRDs (restart after install)")
 	}
 
+	return nil
+}
+
+// registrationGuard makes one controller's registration idempotent: fn runs
+// at most once, and a failed attempt is sticky. CRD absence never reaches
+// the guard, so it stays retryable.
+type registrationGuard struct {
+	mu   sync.Mutex
+	done bool
+	err  error
+}
+
+func (g *registrationGuard) register(fn func() error) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.done {
+		return g.err
+	}
+	if err := fn(); err != nil {
+		g.err = err
+		g.done = true
+		return err
+	}
+	g.done = true
 	return nil
 }
 

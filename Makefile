@@ -194,20 +194,34 @@ test-integration-run: ## Run integration tests against the current kubeconfig co
 test-integration: test-integration-setup test-integration-run ## Set up and run integration tests.
 
 .PHONY: test-e2e-setup
-test-e2e-setup: test-e2e-context-check helm-tool ## Install cert-manager when needed, build/load the manager image, and install the Helm chart into Kind.
+test-e2e-setup: test-e2e-context-check helm-tool ## Install cert-manager when needed, build/load the manager image, and install the Helm chart into Kind. Requires E2E_ALLOW_CRD_DELETE=1: the target cluster must be exclusive and disposable, because setup deletes operand resources cluster-wide.
+	@if [ "$(E2E_ALLOW_CRD_DELETE)" != "1" ]; then \
+		echo "test-e2e-setup tears down the previous e2e release and deletes the operand CRDs" >&2; \
+		echo "cluster-wide, cascade-deleting every DatabaseProvider, DatabaseClaim, and" >&2; \
+		echo "SchemaClaim with their data. Set E2E_ALLOW_CRD_DELETE=1 to acknowledge the" >&2; \
+		echo "target cluster is exclusive and disposable; see CONTRIBUTING's" >&2; \
+		echo "test-environments section." >&2; \
+		exit 1; \
+	fi
 	@if [ "$(E2E_CERT_MANAGER_PROFILE)" != absent ]; then $(MAKE) test-e2e-cert-manager; fi
 	$(KUBECTL) get --raw=/readyz >/dev/null
 	$(MAKE) test-e2e-teardown
-	# Helm does not update CRDs; include module operand CRDs the standalone chart does not package.
-	$(KUBECTL) apply -f config/crd/bases/services.platform.opendatahub.io_databaseservices.yaml \
-		-f config/crd/bases/infrastructure.opendatahub.io_databaseproviders.yaml \
-		-f config/crd/bases/infrastructure.opendatahub.io_databaseclaims.yaml \
-		-f config/crd/bases/infrastructure.opendatahub.io_schemaclaims.yaml
+	# Operand CRDs persist after teardown (pruning lands with the operand
+	# finalizer); delete them so every run exercises the operator's
+	# fresh-install path instead of pre-existing CRDs. The deletion is
+	# cluster-wide: it cascade-deletes every DatabaseProvider, DatabaseClaim,
+	# and SchemaClaim on the cluster, so this target requires an exclusive
+	# e2e cluster (see CONTRIBUTING's test-environments section).
+	$(KUBECTL) delete crd --ignore-not-found --wait --timeout=120s \
+		databaseproviders.infrastructure.opendatahub.io \
+		databaseclaims.infrastructure.opendatahub.io \
+		schemaclaims.infrastructure.opendatahub.io
+	# Only the module's own API is pre-installed; the operator applies the
+	# infrastructure CRDs as operands once the singleton exists. Helm does
+	# not upgrade CRDs, so the pre-apply keeps reused clusters current.
+	$(KUBECTL) apply -f config/crd/bases/services.platform.opendatahub.io_databaseservices.yaml
 	$(KUBECTL) wait --for=condition=Established --timeout=60s \
-		crd/databaseservices.services.platform.opendatahub.io \
-		crd/databaseproviders.infrastructure.opendatahub.io \
-		crd/databaseclaims.infrastructure.opendatahub.io \
-		crd/schemaclaims.infrastructure.opendatahub.io
+		crd/databaseservices.services.platform.opendatahub.io
 	$(MAKE) container-build IMG="$(IMG)"
 	$(MAKE) container-load-kind IMG="$(IMG)" KIND_CLUSTER="$(KIND_CLUSTER)"
 # The bootstrap webhook certificate needs cert-manager; provider/claim tests do not.
@@ -265,13 +279,33 @@ test-e2e-run: test-e2e-context-check ## Verify the Helm-deployed manager reconci
 	ODH_E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE="$(E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE)" \
 	ODH_E2E_EXTERNAL_ADMIN_SECRET_NAME="$(E2E_EXTERNAL_ADMIN_SECRET_NAME)" \
 	ODH_E2E_CONSUMER_IMAGE="$(E2E_CONSUMER_IMAGE)" \
-		go test ./test/e2e/... -v -timeout 20m
+		go test ./test/e2e/... -v -count=1 -timeout 20m
 
 .PHONY: test-e2e-teardown
-test-e2e-teardown: test-e2e-context-check helm-tool ## Remove the e2e DatabaseService, Helm release, and namespace.
+test-e2e-teardown: test-e2e-context-check helm-tool ## Remove e2e claims, DatabaseService, Helm release, and namespace; claims go first because their finalizers are reconciled by the still-running operator. Requires E2E_ALLOW_CRD_DELETE=1 (teardown deletes claims cluster-wide). If a deletion whose finalizer the operator reconciles times out, teardown aborts before uninstalling the operator so reconciliation can recover.
+	@if [ "$(E2E_ALLOW_CRD_DELETE)" != "1" ]; then \
+		echo "test-e2e-teardown deletes claims cluster-wide and the e2e release and" >&2; \
+		echo "namespace. Set E2E_ALLOW_CRD_DELETE=1 to acknowledge the target cluster" >&2; \
+		echo "is exclusive and disposable; see CONTRIBUTING's test-environments section." >&2; \
+		exit 1; \
+	fi
 	@cleanup_status=0; \
+	stuck() { \
+		echo "$$1 deletion timed out: the operator cannot reconcile its finalizers." >&2; \
+		echo "Keeping the operator installed and the Helm release in place so" >&2; \
+		echo "reconciliation can recover; fix the operator or complete the cleanup" >&2; \
+		echo "manually, then re-run make test-e2e-teardown. Do not strip finalizers" >&2; \
+		echo "without completing the PostgreSQL cleanup they perform." >&2; \
+		exit 1; \
+	}; \
+	if $(KUBECTL) get crd schemaclaims.infrastructure.opendatahub.io >/dev/null 2>&1; then \
+		$(KUBECTL) delete schemaclaims.infrastructure.opendatahub.io --all --all-namespaces --ignore-not-found --wait --timeout=120s || stuck "SchemaClaims"; \
+	fi; \
+	if $(KUBECTL) get crd databaseclaims.infrastructure.opendatahub.io >/dev/null 2>&1; then \
+		$(KUBECTL) delete databaseclaims.infrastructure.opendatahub.io --all --all-namespaces --ignore-not-found --wait --timeout=120s || stuck "DatabaseClaims"; \
+	fi; \
 	if $(KUBECTL) get crd databaseservices.services.platform.opendatahub.io >/dev/null 2>&1; then \
-		$(KUBECTL) delete databaseservice default-db-operator --ignore-not-found --wait || cleanup_status=$$?; \
+		$(KUBECTL) delete databaseservice default-db-operator --ignore-not-found --wait --timeout=300s || stuck "The DatabaseService singleton"; \
 	fi; \
 	$(HELM) uninstall "$(E2E_RELEASE)" --namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout 5m || cleanup_status=$$?; \
 	$(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m || cleanup_status=$$?; \

@@ -25,12 +25,16 @@ import (
 
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	infraapi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
+	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 )
 
 const (
@@ -231,4 +235,74 @@ func consumerLogs(ctx context.Context, cfg *rest.Config, namespace, name string)
 		return nil, err
 	}
 	return cli.CoreV1().Pods(namespace).GetLogs(name, &corev1.PodLogOptions{}).DoRaw(ctx)
+}
+
+// ensureOperandCRDs makes sure the module is enabled so the operand CRDs
+// exist. Tests that create providers or claims call it after building their
+// client. It is a no-op when the CRDs are already installed; otherwise it
+// creates the singleton, waits for the operator to apply and establish the
+// CRDs, and removes the singleton at cleanup so later tests observe the
+// same starting state. Together with the lifecycle test's conditional
+// absence assertions this keeps the e2e package order-independent under
+// go test -shuffle=on.
+func ensureOperandCRDs(t *testing.T, ctx context.Context, cli client.Client) {
+	t.Helper()
+	g := NewWithT(t)
+
+	installed := true
+	for _, name := range []string{
+		infraapi.DatabaseProviderCRDName,
+		infraapi.DatabaseClaimCRDName,
+		infraapi.SchemaClaimCRDName,
+	} {
+		err := cli.Get(ctx, client.ObjectKey{Name: name}, &apiextensionsv1.CustomResourceDefinition{})
+		if err == nil {
+			continue
+		}
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "getting operand CRD %s: %v", name, err)
+		installed = false
+	}
+	if installed {
+		return
+	}
+
+	singleton := &servicesv1alpha1.DatabaseService{
+		ObjectMeta: metav1.ObjectMeta{Name: servicesv1alpha1.DatabaseServiceInstanceName},
+	}
+	g.Expect(cli.Create(ctx, singleton)).To(Succeed(),
+		"creating the DatabaseService singleton so the operator installs the operand CRDs")
+	t.Cleanup(func() {
+		cleanupCtx, done := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer done()
+		err := cli.Delete(cleanupCtx, singleton, client.Preconditions{UID: &singleton.UID})
+		if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+			t.Errorf("cleaning up the test-enabled DatabaseService singleton: %v", err)
+			return
+		}
+		g.Eventually(func(g Gomega) {
+			current := &servicesv1alpha1.DatabaseService{}
+			err := cli.Get(cleanupCtx, client.ObjectKey{Name: servicesv1alpha1.DatabaseServiceInstanceName}, current)
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"test-enabled singleton still exists after cleanup: %v", err)
+		}).WithTimeout(2 * time.Minute).WithPolling(500 * time.Millisecond).Should(Succeed())
+	})
+	g.Eventually(func(g Gomega) {
+		for _, name := range []string{
+			infraapi.DatabaseProviderCRDName,
+			infraapi.DatabaseClaimCRDName,
+			infraapi.SchemaClaimCRDName,
+		} {
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			g.Expect(cli.Get(ctx, client.ObjectKey{Name: name}, crd)).To(Succeed(),
+				"operand CRD %s was not applied by the operator", name)
+			established := false
+			for _, condition := range crd.Status.Conditions {
+				if condition.Type == apiextensionsv1.Established {
+					established = condition.Status == apiextensionsv1.ConditionTrue
+				}
+			}
+			g.Expect(established).To(BeTrue(), "operand CRD %s is not Established", name)
+		}
+	}).WithTimeout(3*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+		"waiting for the operator to install the operand CRDs")
 }

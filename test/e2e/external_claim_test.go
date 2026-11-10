@@ -54,6 +54,10 @@ func TestExternalProviderClaimLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
 	t.Cleanup(cancel)
 
+	// The operand CRDs must exist for providers and claims; when this test
+	// is shuffled first, enable the module so it stays order-independent.
+	ensureOperandCRDs(t, ctx, cli)
+
 	adminSecret := &corev1.Secret{}
 	g.Expect(cli.Get(ctx, client.ObjectKey{Namespace: adminNamespace, Name: adminName}, adminSecret)).To(Succeed())
 	for _, key := range []string{"host", "port", "user", "password", "dbname", "ca.crt"} {

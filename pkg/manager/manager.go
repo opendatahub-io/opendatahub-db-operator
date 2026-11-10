@@ -131,13 +131,18 @@ func New(
 		mgr.GetWebhookServer()
 	}
 
-	if err := databaseservice.NewReconciler(ctx, mgr, cfg); err != nil {
+	registration := NewInfrastructureRegistration(ctx, mgr, cfg)
+	if err := databaseservice.NewReconciler(ctx, mgr, cfg, databaseservice.Options{
+		RegisterInfrastructure: registration,
+	}); err != nil {
 		return nil, fmt.Errorf("creating databaseservice reconciler: %w", err)
 	}
 
-	// Registration is unchanged from the previous inline blocks: controllers
-	// register at boot only when their CRDs are already present.
-	if err := NewInfrastructureRegistration(ctx, mgr, cfg)(); err != nil {
+	// A fresh install has no infrastructure CRDs yet: registration then
+	// returns nil by design, and the DatabaseService reconciler's operand
+	// install path owns registration from there. Only sticky setup errors
+	// (scheme or name conflicts) fail startup.
+	if err := registration(); err != nil {
 		return nil, err
 	}
 

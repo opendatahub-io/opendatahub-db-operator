@@ -163,6 +163,10 @@ func TestSchemaClaimLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Minute)
 	t.Cleanup(cancel)
 
+	// The operand CRDs must exist for providers and claims; when this test
+	// is shuffled first, enable the module so it stays order-independent.
+	ensureOperandCRDs(t, ctx, cli)
+
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "odh-db-schemaclaim-"}}
 	g.Expect(cli.Create(ctx, namespace)).To(Succeed())
 	t.Cleanup(func() {
