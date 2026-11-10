@@ -21,6 +21,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
@@ -30,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -82,6 +84,9 @@ func TestDatabaseServiceCreatesDefaultProvider(t *testing.T) {
 	cfg.Controller.Health.BindAddress = "0"
 	cfg.Controller.Pprof.BindAddress = "0"
 	cfg.Controller.Webhook.Enabled = false
+	// The operand RoleBinding's subject is finalized from this; without it
+	// the apply customizer fails explicitly.
+	cfg.OperatorServiceAccount = "odh-db-operator-operator"
 
 	mgr, err := modulemanager.New(ctx, restCfg, cfg)
 	g.Expect(err).NotTo(HaveOccurred())
@@ -266,10 +271,38 @@ func TestDatabaseServiceCreatesDefaultProvider(t *testing.T) {
 			return cli.Update(ctx, claim)
 		}).Should(Succeed())
 	}
+
+	// The claims are gone, but the user-created providers remain: operand
+	// removal must stay blocked — pruning the DatabaseProvider CRD would
+	// cascade them and garbage-collect their storage.
+	g.Eventually(func(g Gomega) {
+		got := &servicesv1alpha1.DatabaseService{}
+		g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(instance), got)).To(Succeed())
+		blocked := conditions.FindStatusCondition(got, "OperandsReady")
+		g.Expect(blocked).NotTo(BeNil())
+		g.Expect(blocked.Reason).To(Equal("BlockingProviders"))
+		g.Expect(blocked.Message).To(ContainSubstring("external-missing-secret"))
+		g.Expect(blocked.Message).To(ContainSubstring("internal"))
+	}).Should(Succeed())
+
+	for _, name := range []string{"external-missing-secret", "internal"} {
+		g.Expect(cli.Delete(ctx, &infraApi.DatabaseProvider{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+		})).To(Succeed())
+	}
+
 	reader := mgr.GetAPIReader()
+	// The deletion is paced by the controller's requeue backoff, which the
+	// deliberately-verified blocked phases (claims, providers) inflate, and
+	// operand CRD termination is slow on loaded CI runners — allow well
+	// beyond the suite's default.
 	g.Eventually(func(g Gomega) {
 		err := reader.Get(ctx, client.ObjectKey{Name: cfg.DefaultProviderName}, &infraApi.DatabaseProvider{})
-		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "default provider should be removed after claims")
+		// The finalizer only succeeds once the operand CRDs are gone, and a
+		// Get of DatabaseProvider afterwards is often a NoKindMatchError
+		// (the kind dropped out of discovery), not a 404: both mean gone.
+		g.Expect(apierrors.IsNotFound(err) || meta.IsNoMatchError(err)).To(BeTrue(),
+			"default provider should be removed after claims")
 		err = reader.Get(ctx, client.ObjectKeyFromObject(instance), &servicesv1alpha1.DatabaseService{})
 		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "DatabaseService should finish deleting")
 		for _, obj := range []client.Object{&corev1.PersistentVolumeClaim{}, &corev1.Secret{}} {
@@ -280,5 +313,5 @@ func TestDatabaseServiceCreatesDefaultProvider(t *testing.T) {
 			g.Expect(reader.Get(ctx, key, obj)).To(Succeed())
 			g.Expect(obj.GetOwnerReferences()).To(BeEmpty())
 		}
-	}).Should(Succeed())
+	}).WithTimeout(4 * time.Minute).Should(Succeed())
 }

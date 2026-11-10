@@ -15,14 +15,18 @@ rules:
   - serviceaccounts
   - services
   verbs:
+  - create
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ""
   resources:
   - persistentvolumeclaims
   verbs:
+  - create
+  - delete
   - get
   - list
   - patch
@@ -57,14 +61,17 @@ rules:
   resources:
   - customresourcedefinitions
   verbs:
+  - delete
   - patch
 - apiGroups:
   - apps
   resources:
   - statefulsets
   verbs:
+  - create
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - authentication.k8s.io
@@ -84,8 +91,10 @@ rules:
   - certificates
   - issuers
   verbs:
+  - create
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - events.k8s.io
@@ -139,17 +148,40 @@ rules:
   resources:
   - networkpolicies
   verbs:
+  - create
   - get
   - list
+  - patch
   - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - internal-provider-writer
+  resources:
+  - clusterroles
+  verbs:
+  - create
+  - delete
+  - get
+  - patch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - rolebindings
   verbs:
+  - create
   - get
   - list
+  - patch
   - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resourceNames:
+  - internal-provider-writer
+  resources:
+  - rolebindings
+  verbs:
+  - delete
 - apiGroups:
   - security.openshift.io
   resourceNames:

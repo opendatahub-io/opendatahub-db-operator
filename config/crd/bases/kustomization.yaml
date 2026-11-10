@@ -1,3 +1,5 @@
 resources:
+- infrastructure.opendatahub.io_databaseclaims.yaml
 - infrastructure.opendatahub.io_databaseproviders.yaml
+- infrastructure.opendatahub.io_schemaclaims.yaml
 - services.platform.opendatahub.io_databaseservices.yaml

@@ -172,7 +172,7 @@ test-unit: ## Run unit tests in the selected packages without a cluster.
 .PHONY: test-envtest
 test-envtest: manifests envtest ## Run the envtest-based reconciler suite (no external cluster required).
 	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-		go test ./test/envtest/... -v -timeout 5m -failfast
+		go test ./test/envtest/... -v -timeout 10m -failfast
 
 .PHONY: test-integration-setup
 test-integration-setup: manifests kustomize ## Prepare the cluster for integration tests.
@@ -206,12 +206,10 @@ test-e2e-setup: test-e2e-context-check helm-tool ## Install cert-manager when ne
 	@if [ "$(E2E_CERT_MANAGER_PROFILE)" != absent ]; then $(MAKE) test-e2e-cert-manager; fi
 	$(KUBECTL) get --raw=/readyz >/dev/null
 	$(MAKE) test-e2e-teardown
-	# Operand CRDs persist after teardown (pruning lands with the operand
-	# finalizer); delete them so every run exercises the operator's
-	# fresh-install path instead of pre-existing CRDs. The deletion is
-	# cluster-wide: it cascade-deletes every DatabaseProvider, DatabaseClaim,
-	# and SchemaClaim on the cluster, so this target requires an exclusive
-	# e2e cluster (see CONTRIBUTING's test-environments section).
+	# Safety net: the teardown's operand-pruning finalizer already deletes
+	# these CRDs via the operator, but a broken operator or a manually
+	# wedged cluster can leave them behind; the --ignore-not-found delete
+	# ensures every run starts from the fresh-install path.
 	$(KUBECTL) delete crd --ignore-not-found --wait --timeout=120s \
 		databaseproviders.infrastructure.opendatahub.io \
 		databaseclaims.infrastructure.opendatahub.io \
@@ -306,6 +304,19 @@ test-e2e-teardown: test-e2e-context-check helm-tool ## Remove e2e claims, Databa
 	fi; \
 	if $(KUBECTL) get crd databaseservices.services.platform.opendatahub.io >/dev/null 2>&1; then \
 		$(KUBECTL) delete databaseservice default-db-operator --ignore-not-found --wait --timeout=300s || stuck "The DatabaseService singleton"; \
+		for crd in databaseproviders.infrastructure.opendatahub.io \
+			databaseclaims.infrastructure.opendatahub.io \
+			schemaclaims.infrastructure.opendatahub.io; do \
+			crd_err="$$($(KUBECTL) get crd "$$crd" 2>&1 >/dev/null)" || true; \
+			if [ -z "$$crd_err" ]; then \
+				$(KUBECTL) wait --for=delete --timeout=120s "crd/$$crd" || stuck "Operand CRD $$crd"; \
+			else \
+				case "$$crd_err" in \
+					*"not found"*) ;; \
+					*) echo "getting CRD $$crd: $$crd_err" >&2; stuck "Checking operand CRD $$crd";; \
+				esac; \
+			fi; \
+		done; \
 	fi; \
 	$(HELM) uninstall "$(E2E_RELEASE)" --namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout 5m || cleanup_status=$$?; \
 	$(KUBECTL) delete namespace "$(E2E_NAMESPACE)" --ignore-not-found --wait --timeout=5m || cleanup_status=$$?; \

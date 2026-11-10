@@ -17,6 +17,10 @@ configMapGenerator:
   literals:
   - platformType=OpenDataHub
   - platformVersion=
+  # The operator's ServiceAccount name must match the namePrefix applied
+  # by config/default (odh-db-operator- + operator). A custom overlay that
+  # changes the namePrefix must also update this literal to match.
+  - operator-service-account=odh-db-operator-operator
   options:
     labels:
       app.kubernetes.io/name: opendatahub-db-operator

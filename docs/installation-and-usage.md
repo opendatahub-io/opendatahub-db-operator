@@ -33,20 +33,11 @@ oc patch datasciencecluster default-dsc --type=merge \
 oc wait --for=condition=Ready databaseservice/default-db-operator --timeout=5m
 ```
 
-For standalone evaluation or development, install the infrastructure CRDs before the chart.
-The chart packages the `DatabaseService` CRD, but not the infrastructure CRDs. The operator
-registers the provider and database claim controllers when it starts and finds their CRDs; the
-provider controller also watches `SchemaClaim` resources:
-
-```sh
-kubectl apply -f config/crd/bases/infrastructure.opendatahub.io_databaseproviders.yaml
-kubectl apply -f config/crd/bases/infrastructure.opendatahub.io_databaseclaims.yaml
-kubectl apply -f config/crd/bases/infrastructure.opendatahub.io_schemaclaims.yaml
-kubectl wait --for=condition=Established \
-  crd/databaseproviders.infrastructure.opendatahub.io \
-  crd/databaseclaims.infrastructure.opendatahub.io \
-  crd/schemaclaims.infrastructure.opendatahub.io --timeout=2m
-```
+For standalone evaluation or development, install the chart directly; the operator
+installs the infrastructure CRDs itself as module operands once the singleton exists,
+so no manual CRD installation is required. Setting the module to `Removed` prunes
+them again (after any remaining claims and providers are deleted, since CRD removal
+cascades every instance).
 
 The chart does not set a namespace in `values.yaml`; install it in `odh-db-operator-system`,
 the namespace used by the Kustomize bundle, or choose another namespace:
@@ -68,7 +59,10 @@ kubectl wait --for=condition=Ready databaseservice/default-db-operator --timeout
 ```
 
 Helm installs the `DatabaseService` CRD on first install but skips CRD changes on upgrade. Apply an
-updated schema separately with `kubectl apply -f config/chart/crds/` alongside `helm upgrade`.
+updated schema separately with `kubectl apply -f config/chart/crds/` alongside `helm upgrade`. The
+infrastructure CRDs upgrade automatically: the operator re-applies them via server-side apply on
+every reconcile, so a `helm upgrade` that ships updated embedded manifests takes effect on the next
+reconciliation without manual intervention.
 
 ## Configure a provider
 
@@ -150,10 +144,12 @@ The Secret contains discrete PostgreSQL connection fields. See the [credential c
 for field names and TLS behavior.
 
 To use another provider, set `spec.provider.name` or `spec.provider.selector` on the claim.
-The same selection applies to `SchemaClaim`. Remove claims using the default provider before
-deleting `DatabaseService`; deletion reports `BlockingClaims` while any bound claim remains.
-The internal PVC and admin Secret remain after removal so the data can be recovered or deleted
-explicitly by an administrator.
+The same selection applies to `SchemaClaim`. Remove every DatabaseClaim and SchemaClaim —
+bound to any provider — before deleting `DatabaseService`; deletion reports `BlockingClaims`
+while any claim remains. Delete any DatabaseProvider you created as well: operand removal
+is blocked while one exists, because pruning the provider CRD cascades it and its storage.
+The internal PVC and admin Secret of the default provider remain after removal so the data
+can be recovered or deleted explicitly by an administrator.
 
 ## Status and limitations
 
