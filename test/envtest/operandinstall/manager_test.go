@@ -34,7 +34,9 @@ import (
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -77,6 +79,9 @@ func TestOperandsInstalledAndControllersRegistered(t *testing.T) {
 	// The establishment gate requeues with this interval while the operand
 	// CRDs settle; the compiled default (3m) would stall the suite.
 	cfg.DatabaseService.RetryInterval = time.Second
+	// The operand RoleBinding's subject is finalized from this; without it
+	// the apply customizer fails explicitly.
+	cfg.OperatorServiceAccount = "odh-db-operator-operator"
 
 	mgr, err := modulemanager.New(ctx, restCfg, cfg)
 	g.Expect(err).NotTo(HaveOccurred())
@@ -152,6 +157,11 @@ func TestOperandsInstalledAndControllersRegistered(t *testing.T) {
 	// The operand CRDs the operator applied are established and remain
 	// after the module singleton exists.
 	reader := mgr.GetAPIReader()
+	operandCRDNames := []string{
+		infraApi.DatabaseProviderCRDName,
+		infraApi.DatabaseClaimCRDName,
+		infraApi.SchemaClaimCRDName,
+	}
 	for _, name := range []string{
 		infraApi.DatabaseProviderCRDName,
 		infraApi.DatabaseClaimCRDName,
@@ -168,4 +178,62 @@ func TestOperandsInstalledAndControllersRegistered(t *testing.T) {
 		}
 		g.Expect(established).To(BeTrue(), "operand CRD %q must be established", name)
 	}
+
+	// Deletion phase (AC2): removing the singleton prunes the CRDs and
+	// operand RBAC with no orphans. The claims gate is verified at unit
+	// level (TestCleanupOperandsBlocksOnAnyClaim); here we verify the full
+	// prune path end-to-end.
+	g.Expect(cli.Delete(ctx, instance)).To(Succeed())
+	g.Eventually(func(g Gomega) {
+		err := cli.Get(ctx, client.ObjectKeyFromObject(instance), &servicesv1alpha1.DatabaseService{})
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "DatabaseService should be removed")
+
+		for _, name := range operandCRDNames {
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			err := reader.Get(ctx, client.ObjectKey{Name: name}, crd)
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+				"operand CRD %q must be pruned (no orphans)", name)
+		}
+		role := &rbacv1.ClusterRole{}
+		err = reader.Get(ctx, client.ObjectKey{Name: "internal-provider-writer"}, role)
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"operand ClusterRole must be pruned (no orphans)")
+		binding := &rbacv1.RoleBinding{}
+		err = reader.Get(ctx, client.ObjectKey{Namespace: cfg.OperatorNamespace, Name: "internal-provider-writer"}, binding)
+		g.Expect(apierrors.IsNotFound(err)).To(BeTrue(),
+			"operand RoleBinding must be pruned (no orphans)")
+	}, 180*time.Second).Should(Succeed(), "all operand resources should be pruned")
+
+	// Re-enable phase: a module pruned by its own finalizer must install
+	// again on the same manager. Immediately after the prune the RESTMapper
+	// can still resolve the infrastructure kinds while the resources are
+	// absent, so the aggregation lists fail with NotFound instead of
+	// NoMatch — the reconcile must tolerate that and reach the deploy
+	// action, or the module is wedged until restart (found live in e2e).
+	instance = &servicesv1alpha1.DatabaseService{
+		ObjectMeta: metav1.ObjectMeta{Name: servicesv1alpha1.DatabaseServiceInstanceName},
+	}
+	g.Expect(cli.Create(ctx, instance)).To(Succeed())
+	g.Eventually(func(g Gomega) {
+		got := &servicesv1alpha1.DatabaseService{}
+		g.Expect(cli.Get(ctx, client.ObjectKeyFromObject(instance), got)).To(Succeed())
+
+		operandsReady := conditions.FindStatusCondition(got, "OperandsReady")
+		g.Expect(operandsReady).NotTo(BeNil())
+		g.Expect(operandsReady.Status).To(Equal(metav1.ConditionTrue))
+		g.Expect(operandsReady.Reason).To(Equal("OperandsEstablished"))
+
+		for _, name := range operandCRDNames {
+			crd := &apiextensionsv1.CustomResourceDefinition{}
+			err := reader.Get(ctx, client.ObjectKey{Name: name}, crd)
+			g.Expect(err).NotTo(HaveOccurred(), "operand CRD %q must be re-applied", name)
+		}
+		role := &rbacv1.ClusterRole{}
+		g.Expect(reader.Get(ctx, client.ObjectKey{Name: "internal-provider-writer"}, role)).To(Succeed(),
+			"operand ClusterRole must be re-applied")
+		binding := &rbacv1.RoleBinding{}
+		bindingKey := client.ObjectKey{Namespace: cfg.OperatorNamespace, Name: "internal-provider-writer"}
+		g.Expect(reader.Get(ctx, bindingKey, binding)).To(Succeed(),
+			"operand RoleBinding must be re-applied")
+	}, 180*time.Second).Should(Succeed(), "module should re-enable after its own prune")
 }

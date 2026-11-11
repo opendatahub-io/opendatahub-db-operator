@@ -31,6 +31,7 @@ import (
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	dbcontroller "github.com/opendatahub-io/opendatahub-db-operator/pkg/controller"
 	dbmetrics "github.com/opendatahub-io/opendatahub-db-operator/pkg/metrics"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -114,7 +115,11 @@ func (m *Module) aggregateProviders(
 ) ([]string, error) {
 	providers := &infraApi.DatabaseProviderList{}
 	if err := m.apiReader.List(ctx, providers); err != nil {
-		if meta.IsNoMatchError(err) {
+		// NotFound, not just NoMatch: the operator's own prune can delete the
+		// operand CRDs while the RESTMapper still resolves the kind, so a
+		// re-enabled module lists a mapped-but-absent resource until the
+		// deploy action recreates the CRDs.
+		if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
 			message := "DatabaseProvider CRD is not installed; provider health is not available"
 			rr.Conditions.Mark(ConditionProviderHealth, metav1.ConditionFalse,
 				conditions.WithSeverity(fwapi.ConditionSeverityInfo),
@@ -214,14 +219,17 @@ func (m *Module) aggregateClaims(
 	databaseCRDMissing := false
 	schemaCRDMissing := false
 
+	// NotFound is tolerated alongside NoMatch: after the operand prune the
+	// RESTMapper can still resolve the kind while the resource is absent
+	// (see aggregateProviders).
 	if err := m.apiReader.List(ctx, databaseClaims); err != nil {
-		if !meta.IsNoMatchError(err) {
+		if !meta.IsNoMatchError(err) && !apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("listing DatabaseClaims: %w", err)
 		}
 		databaseCRDMissing = true
 	}
 	if err := m.apiReader.List(ctx, schemaClaims); err != nil {
-		if !meta.IsNoMatchError(err) {
+		if !meta.IsNoMatchError(err) && !apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("listing SchemaClaims: %w", err)
 		}
 		schemaCRDMissing = true

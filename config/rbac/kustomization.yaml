@@ -20,5 +20,3 @@ resources:
 # role.yaml is generated from the DatabaseService controller's RBAC markers; role_binding.yaml grants it to the manager ServiceAccount.
 - role.yaml
 - role_binding.yaml
-- internal_provider_writer_clusterrole.yaml
-- internal_provider_writer_rolebinding.yaml

@@ -57,6 +57,7 @@ func (v *PlatformVersion) UnmarshalText(text []byte) error {
 
 const (
 	KeyOperatorNS          = "operator-namespace"
+	KeyOperatorSAName      = "operator-service-account"
 	KeyPlatformType        = "platformType"
 	KeyPlatformVersion     = "platformVersion"
 	KeyDefaultProviderName = "default-provider-name"
@@ -154,10 +155,16 @@ var TestedPostgresVersions = postgres.MajorVersionRange{Minimum: 13, Maximum: 17
 // defaults, and independent retry intervals for DatabaseService,
 // DatabaseProvider, DatabaseClaim, and SchemaClaim reconciliation.
 type Config struct {
-	OperatorNamespace   string          `mapstructure:"operator-namespace"`
-	DefaultProviderName string          `mapstructure:"default-provider-name"`
-	PlatformType        string          `mapstructure:"platformType"`
-	PlatformVersion     PlatformVersion `mapstructure:"platformVersion"`
+	OperatorNamespace string `mapstructure:"operator-namespace"`
+	// OperatorServiceAccount names this operator's own ServiceAccount. The
+	// operand RoleBinding's subject is bound to it; the value is deployment
+	// dependent (chart fullname or kustomize namePrefix), so each
+	// installation source sets it. Empty is a misconfiguration: applying the
+	// operand RBAC fails with an explicit error instead of guessing.
+	OperatorServiceAccount string          `mapstructure:"operator-service-account"`
+	DefaultProviderName    string          `mapstructure:"default-provider-name"`
+	PlatformType           string          `mapstructure:"platformType"`
+	PlatformVersion        PlatformVersion `mapstructure:"platformVersion"`
 	// PostgresImage is the Internal provider image. It must implement the Red Hat
 	// PostgreSQL container startup contract used by the rendered StatefulSet.
 	PostgresImage    string           `mapstructure:"postgres-image"`

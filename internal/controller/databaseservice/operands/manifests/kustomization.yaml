@@ -4,3 +4,5 @@ resources:
 - infrastructure.opendatahub.io_databaseclaims.yaml
 - infrastructure.opendatahub.io_databaseproviders.yaml
 - infrastructure.opendatahub.io_schemaclaims.yaml
+- internal-provider-writer-clusterrole.yaml
+- internal-provider-writer-rolebinding.yaml

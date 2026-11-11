@@ -28,11 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fwapi "github.com/opendatahub-io/odh-platform-utilities/framework/api"
+	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/actions"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/actions/deploy"
 	renderKustomize "github.com/opendatahub-io/odh-platform-utilities/framework/controller/actions/render/kustomize"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/conditions"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/predicates/dependent"
 	"github.com/opendatahub-io/odh-platform-utilities/framework/controller/reconciler"
+	odhtypes "github.com/opendatahub-io/odh-platform-utilities/framework/controller/types"
 	infraApi "github.com/opendatahub-io/opendatahub-db-operator/api/infrastructure/v1alpha1"
 	servicesv1alpha1 "github.com/opendatahub-io/opendatahub-db-operator/api/services/v1alpha1"
 	"github.com/opendatahub-io/opendatahub-db-operator/internal/controller/databaseservice/operands"
@@ -50,6 +52,9 @@ type Module struct {
 	// registerInfra registers the infrastructure controllers once the
 	// operand CRDs are established; see Options.RegisterInfrastructure.
 	registerInfra func() error
+	// renderOperands renders the embedded operand kustomization; the deploy
+	// action and the pruning finalizer share it so what installs also prunes.
+	renderOperands actions.Fn
 }
 
 // NewModule captures cfg's platform release for reconciliation.
@@ -65,16 +70,44 @@ func NewModule(cfg *moduleconfig.Config) *Module {
 // +kubebuilder:rbac:groups=services.platform.opendatahub.io,resources=databaseservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=databaseproviders,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=infrastructure.opendatahub.io,resources=schemaclaims;databaseclaims,verbs=list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;secrets,verbs=get;patch
+// Data retention detaches owner references from the Internal provider's
+// storage and admin Secret before provider deletion; OpenShift's
+// OwnerReferencesPermissionEnforcement requires delete on a resource to
+// remove its owner references. The grant is cluster-wide because the
+// Internal provider's resource names are deployment-dependent (derived
+// from the provider name and namespace), so resourceNames cannot scope
+// them; kubebuilder:rbac markers on core-group resources do not support
+// resourceNames anyway.
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;secrets,verbs=get;patch;delete
+// The operator creates and manages Internal provider resources; it must
+// hold the same permissions the internal-provider-writer ClusterRole
+// grants, because Kubernetes RBAC escalation prevention forbids creating
+// a ClusterRole with permissions the creator does not already hold.
+// +kubebuilder:rbac:groups="",resources=configmaps;services;serviceaccounts,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates;issuers,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;patch
 
 // The reconciler installs the infrastructure CRDs as module operands via
 // server-side apply. Applying a CRD that does not exist yet authorizes as
 // create (verified against a live API server; RBAC cannot scope create by
-// resource name), while re-applying an existing one authorizes as patch and
-// is scoped to the three operand CRD names. The delete verb arrives with
-// the operand pruning finalizer.
+// resource name), while re-applying an existing one authorizes as patch.
+// The pruning finalizer deletes them by the same names.
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch;create
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,resourceNames=databaseproviders.infrastructure.opendatahub.io;databaseclaims.infrastructure.opendatahub.io;schemaclaims.infrastructure.opendatahub.io,verbs=patch
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,resourceNames=databaseproviders.infrastructure.opendatahub.io;databaseclaims.infrastructure.opendatahub.io;schemaclaims.infrastructure.opendatahub.io,verbs=patch;delete
+
+// The reconciler applies and prunes the internal-provider-writer ClusterRole
+// and RoleBinding as module operands. Server-side apply of a non-existent
+// object authorizes as create; the apply request still carries the object
+// name in its URL, so the resourceNames-scoped create below is effective
+// for the first apply and stays narrower than an unscoped create (a plain
+// POST would not match resourceNames, but SSA does). The rolebindings rule
+// is name-scoped for delete only — the unscoped rolebindings rule above
+// already grants create, get, list, patch, and watch on all RoleBindings.
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,resourceNames=internal-provider-writer,verbs=create;get;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,resourceNames=internal-provider-writer,verbs=delete
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:urls=/metrics,verbs=get
@@ -112,6 +145,13 @@ func NewReconciler(
 	if err != nil {
 		return fmt.Errorf("preparing operand manifest filesystem: %w", err)
 	}
+	m.renderOperands = renderKustomize.NewAction(
+		renderKustomize.WithEngineFS(operandFS),
+		renderKustomize.WithCache(true),
+		renderKustomize.WithNamespaceFn(func(_ context.Context, _ *odhtypes.ReconciliationRequest) (string, error) {
+			return cfg.OperatorNamespace, nil
+		}),
+	)
 
 	_, err = reconciler.ReconcilerFor(mgr, &servicesv1alpha1.DatabaseService{}).
 		// Provider create and status changes re-aggregate the singleton immediately.
@@ -139,20 +179,23 @@ func NewReconciler(
 		WithReconcilerOpts(
 			reconciler.WithRelease(m.platformRelease),
 			reconciler.WithDefaultRequeueAfter(retryInterval(cfg)),
+			// One finalizer name covers both cleanups: the framework supports
+			// a single WithFinalizerName per reconciler, and renaming the
+			// string would orphan the finalizer on every live singleton. Its
+			// scope includes operand pruning.
 			reconciler.WithFinalizerName(defaultProviderCleanupFinalizer),
 		).
 		WithFinalizer(m.cleanupDefaultProvider).
+		WithFinalizer(m.cleanupOperands).
 		WithAction(m.reportStatus).
 		WithAction(m.initOperandManifests).
-		WithAction(renderKustomize.NewAction(
-			renderKustomize.WithEngineFS(operandFS),
-			renderKustomize.WithCache(true),
-		)).
+		WithAction(m.renderOperands).
 		WithAction(m.deployOperands(deploy.NewAction(
 			deploy.WithMode(deploy.ModeSSA),
 			deploy.WithPartOfLabelDefault(operandPartOf),
 			deploy.WithApplyOrder(),
 			deploy.WithCache(),
+			deploy.WithApplyCustomizer(operandRoleBindingGVK, m.customizeOperandRoleBinding),
 		))).
 		WithAction(m.awaitOperandsEstablished).
 		WithAction(m.ensureDefaultProvider).

@@ -46,8 +46,9 @@ const (
 	resourceKeyCPU      = "cpu"
 	resourceKeyMemory   = "memory"
 
-	configMapKeyPlatformType    = "platformType"
-	configMapKeyPlatformVersion = "platformVersion"
+	configMapKeyPlatformType           = "platformType"
+	configMapKeyPlatformVersion        = "platformVersion"
+	configMapKeyOperatorServiceAccount = "operator-service-account"
 )
 
 // Values defines the Helm chart values structure.
@@ -483,6 +484,14 @@ func ExtractDefaults(deployment *unstructured.Unstructured, resources []unstruct
 				values.Platform.Type = val
 			case configMapKeyPlatformVersion:
 				values.Platform.Version = val
+			case configMapKeyOperatorServiceAccount:
+				// The ConfigMap template derives this key from
+				// serviceAccount.name / chart.fullname and skips it in the
+				// .Values.config loop, so a Values default would be dead
+				// configuration: setting it has no effect, and the kustomize
+				// literal (namePrefixed) is wrong for chart installs. Leave
+				// it out of Values entirely.
+				continue
 			default:
 				values.Config[key] = val
 			}

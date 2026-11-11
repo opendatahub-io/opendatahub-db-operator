@@ -197,8 +197,12 @@ func (m *Module) cleanupDefaultProvider(ctx context.Context, rr *odhtypes.Reconc
 
 func boundClaims(ctx context.Context, cli client.Reader, providerName string, provider *infraApi.DatabaseProvider) ([]string, error) {
 	var names []string
+	// A 404 from the claims list is only trusted once the CRD object is
+	// confirmed gone: a terminating CRD stops serving its resource while
+	// instances still drain, and deleting the default provider under those
+	// claims breaks their finalizer cleanup irreversibly.
 	databases := &infraApi.DatabaseClaimList{}
-	if err := cli.List(ctx, databases); err != nil && !meta.IsNoMatchError(err) {
+	if err := listToleratingMissingCRD(ctx, cli, databases, infraApi.DatabaseClaimCRDName); err != nil {
 		return nil, fmt.Errorf("listing DatabaseClaims before default provider deletion: %w", err)
 	}
 	for _, claim := range databases.Items {
@@ -211,7 +215,7 @@ func boundClaims(ctx context.Context, cli client.Reader, providerName string, pr
 		}
 	}
 	schemas := &infraApi.SchemaClaimList{}
-	if err := cli.List(ctx, schemas); err != nil && !meta.IsNoMatchError(err) {
+	if err := listToleratingMissingCRD(ctx, cli, schemas, infraApi.SchemaClaimCRDName); err != nil {
 		return nil, fmt.Errorf("listing SchemaClaims before default provider deletion: %w", err)
 	}
 	for _, claim := range schemas.Items {

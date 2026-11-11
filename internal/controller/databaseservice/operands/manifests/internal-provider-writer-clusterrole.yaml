@@ -2,6 +2,12 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: internal-provider-writer
+# NOTE: the old Helm chart deployed this as odh-db-operator-internal-provider-writer
+# (kustomize namePrefix). On helm upgrade to this version, Helm deletes the old
+# chart-managed object and the operator recreates it as internal-provider-writer
+# on its next reconcile. Internal provider reconciliation may briefly lack this
+# ClusterRole during that window; errors and requeues self-heal once the operand
+# is applied.
 rules:
 - apiGroups:
   - ""

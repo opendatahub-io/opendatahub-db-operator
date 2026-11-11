@@ -1,0 +1,17 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: internal-provider-writer
+# The subject is finalized at apply time: the operator rewrites name and
+# namespace from its configuration (operator-service-account and
+# operator-namespace), because the ServiceAccount name is deployment
+# dependent (chart fullname or kustomize namePrefix). The values below are
+# placeholders the apply customizer replaces.
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: internal-provider-writer
+subjects:
+- kind: ServiceAccount
+  name: operator
+  namespace: system
