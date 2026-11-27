@@ -87,14 +87,17 @@ and its administrator Secret, then run the suite, for example:
 bash test/e2e/scripts/setup-external-postgres.sh db-operator-dev
 make test-e2e-providers KIND_CLUSTER=db-operator-dev E2E_CERT_MANAGER_PROFILE=present \
   E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE=external-postgres \
-  E2E_EXTERNAL_ADMIN_SECRET_NAME=external-postgres-admin
+  E2E_EXTERNAL_ADMIN_SECRET_NAME=external-postgres-admin \
+  E2E_EXTERNAL_PLAINTEXT_ADMIN_SECRET_NAMESPACE=external-postgres-plaintext \
+  E2E_EXTERNAL_PLAINTEXT_ADMIN_SECRET_NAME=external-postgres-admin
 ```
 
 Use the `absent` profile on a cluster without cert-manager. The [E2E workflow](.github/workflows/e2e.yaml)
 shows setup for both profiles. E2E setup builds and loads an image with Podman; teardown removes the
 configured e2e namespace and `DatabaseService/default-db-operator`, so use an isolated cluster.
-The `external-postgres` namespace created by the setup script remains after the suite. Uncached
-`Containerfile` base images may require registry access.
+The setup script leaves both `external-postgres` (TLS) and `external-postgres-plaintext` namespaces
+after the suite. Prefer/allow plaintext e2e skips when the plaintext Secret env vars are unset.
+Uncached `Containerfile` base images may require registry access.
 
 To exercise the packaged runner, build it with `make e2e-image-build`, then run:
 

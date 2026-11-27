@@ -57,8 +57,13 @@ connection="$connection sslmode='$(escape_conninfo "$DB_SSLMODE")'"
 
 const adminTableSetupScript = connectionScript + `
 case "$DB_SSLMODE" in
-    verify-full)
+    verify-full|verify-ca)
         connection="$connection sslrootcert='/etc/db-trust/ca.crt'"
+        ;;
+    prefer|allow|require)
+        if [ -f /etc/db-trust/ca.crt ]; then
+            connection="$connection sslrootcert='/etc/db-trust/ca.crt'"
+        fi
         ;;
     disable)
         ;;

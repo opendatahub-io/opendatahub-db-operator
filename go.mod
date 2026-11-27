@@ -9,8 +9,8 @@ require (
 	github.com/invopop/jsonschema v0.14.0
 	github.com/k8s-manifest-kit/renderer-gotemplate v0.1.1-0.20260716120521-c6314e947363
 	github.com/onsi/gomega v1.44.0
-	github.com/opendatahub-io/odh-platform-utilities v0.6.1-0.20261120092943-fd90aee56a8a
-	github.com/opendatahub-io/odh-platform-utilities/framework v0.6.1-0.20261120092943-fd90aee56a8a
+	github.com/opendatahub-io/odh-platform-utilities v0.6.1-0.20261126080439-dbcfa8ad2d44
+	github.com/opendatahub-io/odh-platform-utilities/framework v0.6.1-0.20261126080439-dbcfa8ad2d44
 	github.com/operator-framework/api v0.45.0
 	github.com/prometheus/client_golang v1.24.0
 	github.com/rs/xid v1.6.0

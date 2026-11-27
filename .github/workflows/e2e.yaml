@@ -66,7 +66,7 @@ jobs:
             --version "$CERT_MANAGER_VERSION" --namespace cert-manager --create-namespace \
             --set crds.enabled=true --wait --timeout 5m
 
-      - name: Provision external PostgreSQL target
+      - name: Provision external PostgreSQL targets
         run: bash test/e2e/scripts/setup-external-postgres.sh "db-operator-e2e-${{ matrix.cert-manager-profile }}"
 
       - name: Run provider lifecycles
@@ -77,7 +77,9 @@ jobs:
             E2E_ALLOW_CRD_DELETE=1 \
             E2E_CERT_MANAGER_PROFILE="${{ matrix.cert-manager-profile }}" \
             E2E_EXTERNAL_ADMIN_SECRET_NAMESPACE=external-postgres \
-            E2E_EXTERNAL_ADMIN_SECRET_NAME=external-postgres-admin
+            E2E_EXTERNAL_ADMIN_SECRET_NAME=external-postgres-admin \
+            E2E_EXTERNAL_PLAINTEXT_ADMIN_SECRET_NAMESPACE=external-postgres-plaintext \
+            E2E_EXTERNAL_PLAINTEXT_ADMIN_SECRET_NAME=external-postgres-admin
 
   baseline:
     name: Default-deny baseline (Calico)

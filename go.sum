@@ -253,10 +253,10 @@ github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJwooC2xJA040=
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
-github.com/opendatahub-io/odh-platform-utilities v0.6.1-0.20261120092943-fd90aee56a8a h1:8rOMPE+GP9tXL0u8m0un/QUPSUDWXmLa002HglPJ5IU=
-github.com/opendatahub-io/odh-platform-utilities v0.6.1-0.20261120092943-fd90aee56a8a/go.mod h1:/yYTo/gyspyobqyy67oS557D8UN9VH1IuixJgfP3qYg=
-github.com/opendatahub-io/odh-platform-utilities/framework v0.6.1-0.20261120092943-fd90aee56a8a h1:mFsaTdMwH81Ae5Evd1A1PtNP1Ow39AsVO0uiXwI9iwo=
-github.com/opendatahub-io/odh-platform-utilities/framework v0.6.1-0.20261120092943-fd90aee56a8a/go.mod h1:evtXDTUbAvUM+f6SFq6OlibsV0e/AIyJuD0ht5rNR88=
+github.com/opendatahub-io/odh-platform-utilities v0.6.1-0.20261126080439-dbcfa8ad2d44 h1:8dgs/Vm4fsVWoe8MiXDZWCPViY3xjS8XyhRp7hCFkFE=
+github.com/opendatahub-io/odh-platform-utilities v0.6.1-0.20261126080439-dbcfa8ad2d44/go.mod h1:/yYTo/gyspyobqyy67oS557D8UN9VH1IuixJgfP3qYg=
+github.com/opendatahub-io/odh-platform-utilities/framework v0.6.1-0.20261126080439-dbcfa8ad2d44 h1:Pg9hh3RdKnGriNnnfqwLXOLpdSNwq5Nd9fSNf2IgonM=
+github.com/opendatahub-io/odh-platform-utilities/framework v0.6.1-0.20261126080439-dbcfa8ad2d44/go.mod h1:evtXDTUbAvUM+f6SFq6OlibsV0e/AIyJuD0ht5rNR88=
 github.com/openshift/api v0.0.0-20261002115817-f8795cdde518 h1:m0CfIxttdj/Wu0N/uHNgj3ZCB6zQpkWhbdr6rTK1q60=
 github.com/openshift/api v0.0.0-20261002115817-f8795cdde518/go.mod h1:2oI3aXQFDjjl7l4xA9ZPSkB+l+lyfWLg7P2sWg9yEvM=
 github.com/openshift/controller-runtime-common v0.0.0-20261026124434-bdfc411d93cd h1:ryKoDx8pbVqytd/plQ5TvOeoTTC8l4akPB6O3FZULuQ=
